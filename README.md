@@ -1,3 +1,3 @@
 # Radiance Field Project
 
-1. Download the dataset via: ```python dataset_download/download_dataset.py --download_small_subset --download_folder ./data```
+1. Download the dataset via: ```uv run download-dataset --download_small_subset --download_folder ./data```

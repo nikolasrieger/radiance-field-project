@@ -29,11 +29,11 @@ DEFAULT_DOWNLOAD_MODALITIES = [
     "metadata",
     # "depth_maps",   # by default we do not download depth maps!
     "rgb_videos",
-    "mask_videos",
+    # "mask_videos",
     "gaussian_splats",
-    "point_clouds",
-    "sparse_point_clouds",
-    "segmented_point_clouds",
+    # "point_clouds",
+    # "sparse_point_clouds",
+    # "segmented_point_clouds",
 ]
 
 
@@ -86,11 +86,7 @@ def download_dataset(
     """
 
     if not os.path.isdir(download_folder):
-        raise ValueError(
-            "Please specify `download_folder` with a valid path to a target folder"
-            + " for downloading the dataset."
-            + f" {download_folder} does not exist."
-        )
+        os.makedirs(download_folder, exist_ok=True)
 
     if link_list_file.startswith("http"):
         # download the link list file

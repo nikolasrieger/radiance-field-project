@@ -8,7 +8,7 @@
 import os
 
 from argparse import ArgumentParser
-from download_dataset_impl import download_dataset
+from .download_dataset_impl import download_dataset
 
 DEFAULT_HF_REPO = "facebook/uco3d"
 DEFAULT_LINK_LIST_FILE = "https://raw.githubusercontent.com/uco3d/uco3d.github.io/refs/heads/main/links/uco3d_dataset_download_urls.json"
@@ -20,11 +20,11 @@ DEFAULT_DOWNLOAD_MODALITIES = [
     "metadata",
     # "depth_maps",   # by default we do not download depth maps!
     "rgb_videos",
-    "mask_videos",
+    # "mask_videos",
     "gaussian_splats",
-    "point_clouds",
-    "sparse_point_clouds",
-    "segmented_point_clouds",
+    # "point_clouds",
+    # "sparse_point_clouds",
+    # "segmented_point_clouds",
 ]
 
 
@@ -114,7 +114,7 @@ def build_arg_parser(
     return parser
 
 
-if __name__ == "__main__":
+def main():
     parser = build_arg_parser(
         "uCO3D",
         DEFAULT_LINK_LIST_FILE,
