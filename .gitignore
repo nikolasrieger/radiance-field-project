@@ -1,2 +1,72 @@
-data
-__pycache__
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+wheels/
+*.whl
+
+# uv
+.venv/
+venv/
+env/
+
+# uv lock file - usually you DO want to commit this for applications
+# Uncomment the next line only if this is a library, not an application
+# uv.lock
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+.envrc
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Type checkers & linters
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+.dmypy.json
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Logs & databases
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# dataset
+/data/*
