@@ -269,46 +269,55 @@ class UCO3DDataset(Dataset):
         self.normalize_splats = normalize_splats
         self.index = self._build_index(split)
 
-    def _normalize_gaussian_splats(self, splats):
-        means = splats.means  # (N, 3)
-        centroid = means.mean(dim=0, keepdim=True)
-        means_centered = means - centroid
+    def compute_global_stats(self, max_sequences=500):
+        unique_dirs = list(set([item["gaussian_splats_dir"] for item in self.index]))
+        if max_sequences:
+            unique_dirs = unique_dirs[:max_sequences]
+
+        all_sh0, all_scales, all_opacities = [], [], []
+
+        for rel_dir in unique_dirs:
+            splats = self._load_splats(rel_dir)
+            if splats.fg_mask is not None:
+                mask = splats.fg_mask.reshape(-1) > 0.5
+                all_sh0.append(splats.sh0[mask])
+                all_scales.append(splats.scales[mask])
+                all_opacities.append(splats.opacities[mask])
+            else:
+                all_sh0.append(splats.sh0)
+                all_scales.append(splats.scales)
+                all_opacities.append(splats.opacities)
+
+        sh0_cat = torch.cat(all_sh0, dim=0)
+        scales_cat = torch.cat(all_scales, dim=0)
+        op_cat = torch.cat(all_opacities, dim=0)
+
+        self.global_stats = {
+            "sh0_mean": sh0_cat.mean(dim=0, keepdim=True),
+            "sh0_std": sh0_cat.std(dim=0, keepdim=True).clamp(min=1e-8),
+            "scale_mean": scales_cat.mean(dim=0, keepdim=True),
+            "scale_std": scales_cat.std(dim=0, keepdim=True).clamp(min=1e-8),
+            "op_mean": op_cat.mean(dim=0, keepdim=True),
+            "op_std": op_cat.std(dim=0, keepdim=True).clamp(min=1e-8),
+        }
+
+    def _normalize_with_global_stats(self, splats):
+        centroid = splats.means.mean(dim=0, keepdim=True)
+        means_centered = splats.means - centroid
         position_scale = means_centered.norm(dim=1).max().clamp(min=1e-8)
         means_norm = means_centered / position_scale
 
-        scales_norm = splats.scales - torch.log(position_scale)
+        sh0_norm = (splats.sh0 - self.global_stats["sh0_mean"]) / self.global_stats["sh0_std"]
+        scales_norm = (splats.scales - self.global_stats["scale_mean"]) / self.global_stats["scale_std"]
+        
+        opacities = splats.opacities.unsqueeze(1) if splats.opacities.dim() == 1 else splats.opacities
+        op_norm = (opacities - self.global_stats["op_mean"]) / self.global_stats["op_std"]
 
-        quats = splats.quats
-        quats_norm = quats / quats.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        quats_norm = splats.quats / splats.quats.norm(dim=-1, keepdim=True).clamp(min=1e-8)
         sign = torch.where(quats_norm[:, :1] < 0, -1.0, 1.0)
         quats_norm = quats_norm * sign
 
-        sh0 = splats.sh0
-        sh0_mean = sh0.mean(dim=0, keepdim=True)
-        sh0_std = sh0.std(dim=0, keepdim=True).clamp(min=1e-8)
-        sh0_norm = (sh0 - sh0_mean) / sh0_std
-
-        opacities = splats.opacities.unsqueeze(1) if splats.opacities.dim() == 1 else splats.opacities
-        op_mean = opacities.mean(dim=0, keepdim=True)
-        op_std = opacities.std(dim=0, keepdim=True).clamp(min=1e-8)
-        opacities_norm = (opacities - op_mean) / op_std
-
-        normalized_tensor = torch.cat([
-            means_norm,      # 0:3
-            sh0_norm,        # 3:6
-            opacities_norm,  # 6:7
-            scales_norm,     # 7:10
-            quats_norm,      # 10:14
-        ], dim=-1)
-
-        norm_stats = {
-            "centroid": centroid,
-            "position_scale": position_scale,
-            "sh0_mean": sh0_mean, "sh0_std": sh0_std,
-            "op_mean": op_mean,   "op_std": op_std,
-        }
-
-        return normalized_tensor, norm_stats
+        return torch.cat([means_norm, sh0_norm, op_norm, scales_norm, quats_norm], dim=-1)
 
     def _build_index(self, split):
         meta_path = os.path.join(self.data_root, "metadata.sqlite")
@@ -471,6 +480,7 @@ class UCO3DDataset(Dataset):
 
 def get_dataloader(data_root, batch_size, split = "train", num_samples = None):
     dataset = UCO3DDataset(data_root=data_root, split=split, normalize_splats=True)
+    dataset.compute_global_stats(max_sequences=len(dataset))
     subset_indices = range(num_samples) if num_samples is not None else range(len(dataset))
     small_dataset = Subset(dataset, subset_indices)
     return DataLoader(
