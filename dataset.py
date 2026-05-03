@@ -11,7 +11,7 @@ import imageio.v2 as imageio
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 
 @dataclass
@@ -469,10 +469,12 @@ class UCO3DDataset(Dataset):
         return _load_gaussian_splats(path)
 
 
-def get_dataloader(data_root, batch_size, split = "train"):
+def get_dataloader(data_root, batch_size, split = "train", num_samples = None):
     dataset = UCO3DDataset(data_root=data_root, split=split, normalize_splats=True)
+    subset_indices = range(num_samples) if num_samples is not None else range(len(dataset))
+    small_dataset = Subset(dataset, subset_indices)
     return DataLoader(
-        dataset,
+        small_dataset,
         batch_size=batch_size,
         shuffle=(split == "train"),
         num_workers=0,
@@ -486,4 +488,4 @@ if __name__ == "__main__":
     print("Batch loaded!")
     print(f"image_rgb:            {sample['image_rgb'].shape}")
     print(f"fg_probability:       {sample['fg_probability'].shape}")
-    print(f"gaussian_splats.means:{sample['sequence_gaussian_splats'].means.shape}")
+    print(f"splat_tensor:         {sample['splat_tensor'].shape}")
