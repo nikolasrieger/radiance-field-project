@@ -222,10 +222,11 @@ def _apply_alignment(camera, splats, R, T, s):
     new_cam.T = (s * (camera.T[0] - T @ camera.R[0]))[None]
 
     if splats is not None and len(splats) > 0:
-        new_means = (splats.means.float() @ R + T) * s
+        # FIX: use R.T for means, matching official transform_gaussian_splats
+        new_means = (splats.means.float() @ R.T + T) * s  # <-- R.T not R
         new_scales = splats.scales.float() + torch.log(s.clamp(min=1e-8))
         q_R = torch.tensor(
-            Rotation.from_matrix(R.numpy()).as_quat()[[3, 0, 1, 2]],
+            Rotation.from_matrix(R.T.numpy()).as_quat()[[3, 0, 1, 2]],  # <-- R.T
             dtype=torch.float32,
         )
         new_quats = _quat_mul(q_R.expand(len(splats), 4), splats.quats.float())
@@ -451,13 +452,10 @@ class UCO3DDataset(Dataset):
             "sequence_name":                fd["sequence_name"],
             "frame_number":                 fd["frame_number"],
         }
-
+        
         if self.normalize_splats:
-            norm_tensor, norm_stats = self._normalize_gaussian_splats(splats)
+            norm_tensor = self._normalize_with_global_stats(splats)
             data["splat_tensor"] = norm_tensor
-            data["norm_stats"] = norm_stats
-        else:
-            data["sequence_gaussian_splats"] = splats
 
         return data
 
