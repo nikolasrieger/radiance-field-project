@@ -70,3 +70,6 @@ desktop.ini
 
 # dataset
 /data/*
+
+# wandb
+wandb/
