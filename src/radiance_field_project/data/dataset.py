@@ -14,7 +14,7 @@ def make_uco3d_dataset(
     apply_alignment: bool = True,
     load_images: bool = True,
     load_depths: bool = False,
-    load_masks: bool = True,
+    load_masks: bool = False,
     load_point_clouds: bool = False,
     load_gaussian_splats: bool = True,
     box_crop: bool = True,

@@ -8,6 +8,8 @@ class SimpleAutoencoder(nn.Module):
             nn.Linear(14, 14),
             nn.ReLU(),
             nn.Linear(14,14),
+            nn.ReLU(),
+            nn.Linear(14,14)
         )
 
     def forward(self, x):

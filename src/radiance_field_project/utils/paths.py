@@ -22,7 +22,3 @@ UCO3D_DATASET_ROOT = _root_path.resolve()
 
 
 os.environ["UCO3D_DATASET_ROOT"] = str(UCO3D_DATASET_ROOT)
-
-CHECKPOINTS_DIR = PROJECT_ROOT / "checkpoints"
-LOGS_DIR = PROJECT_ROOT / "logs"
-CONFIGS_DIR = PROJECT_ROOT / "configs"
