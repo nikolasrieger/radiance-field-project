@@ -1,4 +1,6 @@
 """Conversions between ``GaussianSplats`` objects and flat feature tensors."""
+from typing import Mapping
+
 import torch
 import torch.nn.functional as F
 
@@ -50,12 +52,13 @@ def features_to_gaussians(features: torch.Tensor) -> GaussianSplats:
 def batch_to_features(sample) -> tuple[torch.Tensor, torch.Tensor]:
     """Flatten a batched sample's per-scene splats into one feature tensor.
 
-    ``sample.sequence_gaussian_splats`` is a list of ``GaussianSplats``
+    ``sample["sequence_gaussian_splats"]`` is a list of ``GaussianSplats``
     (one per batch item). Returns:
         features:  ``[total_N, 14]`` — all Gaussians concatenated.
         batch_idx: ``[total_N]``    — which scene each Gaussian belongs to.
     """
-    feats_list = [gaussians_to_features(gs) for gs in sample.sequence_gaussian_splats]
+    splats = sample["sequence_gaussian_splats"] if isinstance(sample, Mapping) else sample.sequence_gaussian_splats
+    feats_list = [gaussians_to_features(gs) for gs in splats]
     features = torch.cat(feats_list, dim=0)
     batch_idx = torch.cat([
         torch.full((f.shape[0],), i, dtype=torch.long)
