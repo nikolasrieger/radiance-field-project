@@ -73,3 +73,6 @@ desktop.ini
 
 # wandb
 wandb/
+
+#Claude
+.claude/
