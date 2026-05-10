@@ -4,8 +4,8 @@ from typing import Sequence
 
 from torch.utils.data import DataLoader
 
-from radiance_field_project.data.collate import uco3d_collate
-from radiance_field_project.data.dataset import make_uco3d_dataset
+from src.data.collate import uco3d_collate
+from src.data.dataset import make_uco3d_dataset
 
 
 @dataclass
@@ -15,7 +15,7 @@ class UCO3DDataModule:
     Configuration values are kept on the dataclass so callers can override
     selectively without long arg lists at the call site.
     """
-    subset_lists_filename: str = "set_lists_all-categories.sqlite"
+    subset_lists_filename: str = "/home/nrieger/radiance-field-project/set_lists_all-categories.sqlite"
     batch_size: int = 4
     num_workers: int = 4
     pin_memory: bool = True

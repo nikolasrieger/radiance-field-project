@@ -1,11 +1,11 @@
-# src/radiance_field_project/data/dataset.py
+# src/data/dataset.py
 """Factory functions for constructing UCO3DDataset instances."""
 from pathlib import Path
 from typing import Sequence
 
 from uco3d import UCO3DDataset, UCO3DFrameDataBuilder
 
-from radiance_field_project.utils.paths import UCO3D_DATASET_ROOT
+from src.utils.paths import UCO3D_DATASET_ROOT
 
 
 def make_uco3d_dataset(

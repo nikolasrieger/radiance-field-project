@@ -6,9 +6,11 @@ __pycache__/
 .Python
 *.egg
 *.egg-info/
+*.deb
 dist/
 build/
 wheels/
+*.png
 *.whl
 
 # uv
