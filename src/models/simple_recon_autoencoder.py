@@ -15,35 +15,33 @@ class POC_Network(nn.Module):
             nn.ReLU(),
             nn.Linear(64, dim)
         )
+        #nn.init.zeros_(self.model[-1].weight)
+        #nn.init.zeros_(self.model[-1].bias)
+
 
     def forward(self, x):
         x = self.model(x)
         return x
 
     def reconstruct_splats(self, splats):
-        means = splats.means  # (N, 3)
-        sh0 = splats.sh0     # (N, 3)
-        scales = splats.scales  # (N, 3)
-        quats = splats.quats    # (N, 4)
-        opacities = splats.opacities  # (N,)
+        means     = splats.means
+        sh0       = splats.sh0
+        scales    = splats.scales
+        quats     = splats.quats
+        opacities = splats.opacities
 
-        flat = torch.cat([means, sh0, scales, quats, opacities.unsqueeze(-1)], dim=-1)
-
-        reconstructed_flat = self.model(flat)
-        means_recon = reconstructed_flat[:, 0:3]
-        sh0_recon = reconstructed_flat[:, 3:6]
-        scales_recon = reconstructed_flat[:, 6:9]
-        quats_recon = reconstructed_flat[:, 9:13]
-        opacities_recon = reconstructed_flat[:, 13:14].squeeze(-1)
+        flat  = torch.cat([means, sh0, scales, quats, opacities.unsqueeze(-1)], dim=-1)
+        delta = self.model(flat)
 
         return GaussianSplats(
-            means=means_recon,
-            sh0=sh0_recon,
-            scales=scales_recon,
-            quats=quats_recon,
-            opacities=opacities_recon,
-            shN=splats.shN,
-            fg_mask=splats.fg_mask,
+            means     = means + delta[:, 0:3],
+            sh0       = sh0 + delta[:, 3:6], 
+            scales    = scales,# + 0.01 * delta[:, 6:9].clamp(-1, 1),
+            quats     = quats + delta[:, 6:10], 
+            opacities = opacities + delta[:, 13], 
+            shN       = splats.shN,
+            fg_mask   = splats.fg_mask,
         )
+
 
 network = POC_Network(14)
