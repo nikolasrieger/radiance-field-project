@@ -56,4 +56,5 @@ def make_uco3d_dataset(
         subset_lists_file=str(subset_lists_file),
         subsets=list(subsets),
         frame_data_builder=frame_data_builder,
+        pick_sequences=('26-14460-30571',),
     )

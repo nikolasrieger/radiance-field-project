@@ -36,7 +36,7 @@ class POC_Network(nn.Module):
         return GaussianSplats(
             means     = means + delta[:, 0:3],
             sh0       = sh0 + delta[:, 3:6], 
-            scales    = scales,# + 0.01 * delta[:, 6:9].clamp(-1, 1),
+            scales    = scales + 0.01 * delta[:, 6:9].clamp(-1, 1),
             quats     = quats + delta[:, 6:10], 
             opacities = opacities + delta[:, 13], 
             shN       = splats.shN,

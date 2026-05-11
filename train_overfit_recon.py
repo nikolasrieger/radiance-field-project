@@ -13,7 +13,7 @@ from src.utils.splat_visualizer import SplatRenderVisualizer
 
 os.environ["UCO3D_DATASET_ROOT"] = "/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw"
 
-EPOCHS     = 5000
+EPOCHS     = 10000
 LR         = 1e-4
 NUM_VIEWS  = 10
 DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
