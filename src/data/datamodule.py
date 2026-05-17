@@ -4,8 +4,8 @@ from typing import Sequence
 
 from torch.utils.data import DataLoader
 
-from data.collate import uco3d_collate
-from data.dataset import make_uco3d_dataset
+from src.data.collate import uco3d_collate
+from src.data.dataset import make_uco3d_dataset
 
 
 @dataclass

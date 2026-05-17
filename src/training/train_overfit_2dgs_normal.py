@@ -1,12 +1,12 @@
-from models.minipointnet import MiniPointNet2DGSNetwork
+from src.models.minipointnet import MiniPointNet2DGSNetwork
 import torch
 import os
 import torch.nn.functional as F
 from torch.optim import AdamW
-from data.datamodule import UCO3DDataModule
-from utils.splat_visualizer import SplatRenderVisualizer
-from utils.losses import reconstruction_loss
-from utils.rendering import render_2dgs, render, get_camera_params
+from src.data.datamodule import UCO3DDataModule
+from src.utils.splat_visualizer import SplatRenderVisualizer
+from src.utils.losses import reconstruction_loss
+from src.utils.rendering import render_2dgs, render, get_camera_params
 
 os.environ["UCO3D_DATASET_ROOT"] = "/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw"
 
@@ -21,6 +21,7 @@ print(f"Device: {DEVICE}")
 
 # ── data ──────────────────────────────────────────────────────────────────────
 dm = UCO3DDataModule(
+    subset_lists_filename="/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw/set_lists/set_lists_all-categories.sqlite",
     batch_size=1, num_workers=0,
     image_height=512, image_width=512,
     load_masks=True,
