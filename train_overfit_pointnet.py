@@ -247,7 +247,7 @@ for epoch in range(EPOCHS):
                 v0_mats, v0_K, v0_h, v0_w,
             )
             SplatRenderVisualizer.save(
-                "gt_vs_recon_minipointnet.png",
+                "gt_vs_recon_pointnet.png",
                 render_colors = torch.cat([
                     v0_gt_image.permute(0, 2, 3, 1),
                     ref_render.permute(0, 2, 3, 1),
