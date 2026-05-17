@@ -38,10 +38,10 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/radiance_field_project"]
+packages = ["src/"]
 
 [tool.uv.sources]
 uco3d = { git = "https://github.com/facebookresearch/uco3d.git", rev = "b17b2afcd286d83cc1a31c2546c374bfb2e984f6" }
 
 [project.scripts]
-download-dataset = "radiance_field_project.data.dataset_download.download_dataset:main"
+download-dataset = "data.dataset_download.download_dataset:main"
