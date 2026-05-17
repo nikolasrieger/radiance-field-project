@@ -1,8 +1,6 @@
 import torch
 import os
-import torch.nn.functional as F
 from torch.optim import AdamW
-from gsplat import rasterization
 from uco3d.dataset_utils.data_types import GaussianSplats
 from src.models.simple_recon_autoencoder import ReconAutoencoder
 from src.data.datamodule import UCO3DDataModule
