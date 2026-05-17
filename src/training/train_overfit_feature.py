@@ -4,11 +4,11 @@ import torch
 from torch.optim import AdamW
 from uco3d import render_splats
 import torch.nn.functional as F
-from src.data.gaussian_features import batch_to_features
-from src.models.simple_autoencoder import SimpleAutoencoder
-from src.data.datamodule import UCO3DDataModule
-from src.data.gaussian_features import features_to_gaussians
-from src.utils.splat_visualizer import SplatRenderVisualizer
+from data.gaussian_features import batch_to_features
+from models.simple_autoencoder import SimpleAutoencoder
+from data.datamodule import UCO3DDataModule
+from data.gaussian_features import features_to_gaussians
+from utils.splat_visualizer import SplatRenderVisualizer
 
 os.environ["UCO3D_DATASET_ROOT"] = "/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw"
 

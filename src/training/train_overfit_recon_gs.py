@@ -3,11 +3,11 @@ import os
 import torch.nn.functional as F
 from torch.optim import AdamW
 from uco3d.dataset_utils.data_types import GaussianSplats
-from src.models.simple_recon_autoencoder import AbsoluteReconAutoencoder
-from src.data.datamodule import UCO3DDataModule
-from src.utils.splat_visualizer import SplatRenderVisualizer
-from src.utils.rendering import get_camera_params, render
-from src.utils.losses import l2_loss
+from models.simple_recon_autoencoder import AbsoluteReconAutoencoder
+from data.datamodule import UCO3DDataModule
+from utils.splat_visualizer import SplatRenderVisualizer
+from utils.rendering import get_camera_params, render
+from utils.losses import l2_loss
 
 os.environ["UCO3D_DATASET_ROOT"] = "/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw"
 

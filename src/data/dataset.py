@@ -5,7 +5,7 @@ from typing import Sequence
 
 from uco3d import UCO3DDataset, UCO3DFrameDataBuilder
 
-from src.utils.paths import UCO3D_DATASET_ROOT
+from utils.paths import UCO3D_DATASET_ROOT
 
 
 def make_uco3d_dataset(

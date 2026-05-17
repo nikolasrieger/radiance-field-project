@@ -42,7 +42,7 @@ class PointNet2Network(nn.Module):
         return l3_pts.view(xyz.shape[0], -1)               # (B, 1024)
 
     def encode_multiscale(self, means_b, normals=None):
-        from src.models.pointnet2_utils import farthest_point_sample, index_points
+        from models.pointnet2_utils import farthest_point_sample, index_points
 
         # ── Normalize to unit sphere (ModelNet40 training scale) ──
         centroid = means_b.mean(dim=1, keepdim=True)          # (1, 1, 3)

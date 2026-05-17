@@ -1,12 +1,12 @@
-from src.models.minipointnet import MiniPointNet2DGSNetwork
+from models.minipointnet import MiniPointNet2DGSNetwork
 import torch
 import os
 import torch.nn.functional as F
 from torch.optim import AdamW
-from src.data.datamodule import UCO3DDataModule
-from src.utils.splat_visualizer import SplatRenderVisualizer
-from src.utils.losses import reconstruction_loss
-from src.utils.rendering import render_2dgs, render, get_camera_params
+from data.datamodule import UCO3DDataModule
+from utils.splat_visualizer import SplatRenderVisualizer
+from utils.losses import reconstruction_loss
+from utils.rendering import render_2dgs, render, get_camera_params
 
 os.environ["UCO3D_DATASET_ROOT"] = "/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw"
 

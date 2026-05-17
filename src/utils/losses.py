@@ -1,4 +1,5 @@
-import torch 
+import torch
+import torch.nn.functional as F
 
 def l2_loss(pred, gt, mask=None):
     squared_diff = (pred - gt) ** 2
