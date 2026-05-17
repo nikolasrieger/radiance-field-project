@@ -12,6 +12,7 @@ build/
 wheels/
 *.png
 *.whl
+logs_*/
 
 # uv
 .venv/

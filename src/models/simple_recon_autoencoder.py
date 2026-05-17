@@ -2,7 +2,7 @@ from uco3d.dataset_utils.data_types import GaussianSplats
 from torch import nn
 import torch
 
-class POC_Network(nn.Module):
+class ReconAutoencoder(nn.Module):
     def __init__(self, dim):
         super().__init__()
 
@@ -43,7 +43,7 @@ class POC_Network(nn.Module):
             fg_mask   = splats.fg_mask,
         )
 
-class Absolute_POC_Network(nn.Module):
+class AbsoluteReconAutoencoder(nn.Module):
     def __init__(self, input_dim, output_dim=14):
         super().__init__()
 
