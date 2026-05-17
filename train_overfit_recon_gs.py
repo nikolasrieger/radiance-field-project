@@ -6,16 +6,16 @@ from gsplat import rasterization
 from uco3d import render_splats
 from uco3d.dataset_utils.utils import opencv_cameras_projection_from_uco3d
 from uco3d.dataset_utils.data_types import GaussianSplats
-from src.models.simple_recon_autoencoder import POC_Network
+from src.models.simple_recon_autoencoder import Absolute_POC_Network, POC_Network
 from src.data.datamodule import UCO3DDataModule
 from src.data.gaussian_features import batch_to_features, features_to_gaussians
 from src.utils.splat_visualizer import SplatRenderVisualizer
 
 os.environ["UCO3D_DATASET_ROOT"] = "/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw"
 
-EPOCHS     = 10000
+EPOCHS     = 5000
 LR         = 1e-4
-NUM_VIEWS  = 10
+NUM_VIEWS  = 1
 DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 LOSS_WEIGHTS = {
@@ -26,7 +26,7 @@ LOSS_WEIGHTS = {
     "quats":     0.1,
 }
 LAMBDA_PHOTO = 1.0   # weight for photometric loss
-LAMBDA_RECON = 0.1   # weight for Gaussian parameter loss
+LAMBDA_RECON = 0.0   # weight for Gaussian parameter loss
 
 print(f"Device: {DEVICE}")
 
@@ -149,7 +149,7 @@ def gaussian_reconstruction_loss(pred, gt, weights=None):
     return total, breakdown
 
 # ── model + optimiser ─────────────────────────────────────────────────────────
-network   = POC_Network(14).to(DEVICE)
+network = Absolute_POC_Network(input_dim=14, output_dim=14).to(DEVICE)
 optimizer = AdamW(network.parameters(), lr=LR)
 
 # ── reference render (no grad) ────────────────────────────────────────────────

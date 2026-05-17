@@ -43,5 +43,41 @@ class POC_Network(nn.Module):
             fg_mask   = splats.fg_mask,
         )
 
+class Absolute_POC_Network(nn.Module):
+    def __init__(self, input_dim, output_dim=14):
+        super().__init__()
 
-network = POC_Network(14)
+        self.model = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.LayerNorm(128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, output_dim)
+        )
+
+    def forward(self, x):
+        return self.model(x)
+
+    def reconstruct_splats(self, splats):
+        means     = splats.means
+        sh0       = splats.sh0
+        scales    = splats.scales
+        quats     = splats.quats
+        opacities = splats.opacities
+
+        flat = torch.cat([means, sh0, scales, quats, opacities.unsqueeze(-1)], dim=-1)
+        
+        out = self.model(flat)
+
+        return GaussianSplats(
+            means     = out[:, 0:3],           # Absolute (x, y, z)
+            sh0       = out[:, 3:6],           # Absolute RGB/SH0
+            scales    = out[:, 6:9],           # Absolute Scales
+            quats     = out[:, 9:13],          # Absolute Quaternions
+            opacities = out[:, 13],            # Absolute Opacity logits
+            shN       = splats.shN,            # Pass-through
+            fg_mask   = splats.fg_mask,
+        )
