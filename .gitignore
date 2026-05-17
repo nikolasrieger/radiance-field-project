@@ -77,4 +77,7 @@ desktop.ini
 wandb/
 
 #Claude
-.claude/
+.claude
+
+# Checkpoints
+checkpoints/
