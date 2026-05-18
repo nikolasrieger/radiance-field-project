@@ -23,6 +23,7 @@ print(f"Device: {DEVICE}")
 
 # ── data ──────────────────────────────────────────────────────────────────────
 dm = UCO3DDataModule(
+    subset_lists_filename="/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw/set_lists/set_lists_all-categories.sqlite",
     batch_size=1, num_workers=0,
     image_height=512, image_width=512,
     load_masks=True,

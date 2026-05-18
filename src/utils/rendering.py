@@ -15,20 +15,20 @@ def get_camera_params(sample, device, ret_normals=False):
     viewmats = torch.eye(4)[None].to(device)
     viewmats[:, :3, :4] = torch.cat([Rcv, tvec[..., None]], dim=-1)
     K = K.to(device)
-    R_c2w = viewmats[:, :3, :3].transpose(1, 2)        # (1, 3, 3)
-
-    depth_map  = sample["depth_map"].to(device)         # (1, 1, H, W)
-    depth_mask = sample["depth_mask"].to(device)        # (1, 1, H, W)
-    scale_adj  = sample["depth_scale_adjustment"]
-    if hasattr(scale_adj, "to"):
-        scale_adj = scale_adj.to(device).view(-1, 1, 1, 1).float()
-    else:
-        scale_adj = float(scale_adj)
-    depth_map  = depth_map * scale_adj  
-    gt_normals_depth = depth_to_normals(depth_map, K, depth_mask)  # (1,3,H,W)
 
     if ret_normals:
+        R_c2w = viewmats[:, :3, :3].transpose(1, 2)        # (1, 3, 3)
+        depth_map  = sample["depth_map"].to(device)         # (1, 1, H, W)
+        depth_mask = sample["depth_mask"].to(device)        # (1, 1, H, W)
+        scale_adj  = sample["depth_scale_adjustment"]
+        if hasattr(scale_adj, "to"):
+            scale_adj = scale_adj.to(device).view(-1, 1, 1, 1).float()
+        else:
+            scale_adj = float(scale_adj)
+        depth_map  = depth_map * scale_adj
+        gt_normals_depth = depth_to_normals(depth_map, K, depth_mask)  # (1,3,H,W)
         return viewmats, K, gt_image, fg_mask, h, w, R_c2w, gt_normals_depth
+
     return viewmats, K, gt_image, fg_mask, h, w
 
 

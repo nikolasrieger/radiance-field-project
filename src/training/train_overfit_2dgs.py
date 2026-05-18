@@ -3,11 +3,11 @@ import os
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch import nn
-from data.datamodule import UCO3DDataModule
-from utils.splat_visualizer import SplatRenderVisualizer
-from utils.rendering import get_camera_params, render_2dgs
-from models.minipointnet import MiniPointNet2DGSNetwork
-from utils.losses import reconstruction_loss
+from src.data.datamodule import UCO3DDataModule
+from src.utils.splat_visualizer import SplatRenderVisualizer
+from src.utils.rendering import get_camera_params, render_2dgs
+from src.models.minipointnet import MiniPointNet2DGSNetwork
+from src.utils.losses import reconstruction_loss
 
 os.environ["UCO3D_DATASET_ROOT"] = "/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw"
 
@@ -20,9 +20,11 @@ print(f"Device: {DEVICE}")
 
 # ── data ──────────────────────────────────────────────────────────────────────
 dm = UCO3DDataModule(
+    subset_lists_filename="/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw/set_lists/set_lists_all-categories.sqlite",
     batch_size=1, num_workers=0,
     image_height=512, image_width=512,
     load_masks=True,
+    load_depths=True,
 )
 torch.manual_seed(1)
 train_loader    = dm.train_loader()

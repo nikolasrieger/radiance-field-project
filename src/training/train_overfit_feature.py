@@ -20,6 +20,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")
 
 dm = UCO3DDataModule(
+    subset_lists_filename="/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw/set_lists/set_lists_all-categories.sqlite",
     batch_size=1,
     num_workers=0,
     image_height=512,

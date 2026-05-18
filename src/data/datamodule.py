@@ -6,8 +6,8 @@ from typing import Iterator, List, Sequence
 from torch.utils.data import DataLoader, Sampler
 from uco3d import UCO3DDataset
 
-from data.collate import uco3d_collate
-from data.dataset import make_uco3d_dataset
+from src.data.collate import uco3d_collate
+from src.data.dataset import make_uco3d_dataset
 
 
 class SequenceBatchSampler(Sampler[List[int]]):
