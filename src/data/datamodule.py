@@ -1,22 +1,42 @@
 """DataLoader construction for uCO3D."""
+import torch
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Iterator, List, Sequence
 
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
+from uco3d import UCO3DDataset
 
 from data.collate import uco3d_collate
 from data.dataset import make_uco3d_dataset
 
 
+class SequenceBatchSampler(Sampler[List[int]]):
+    def __init__(self, dataset: UCO3DDataset, shuffle: bool = False, seed: int = 0) -> None:
+        self._batches: List[List[int]] = [
+            list(dataset.sequence_indices_in_order(seq))
+            for seq in dataset.sequence_names()
+        ]
+        self._shuffle = shuffle
+        self._seed = seed
+        self._epoch = 0
+
+    def __iter__(self) -> Iterator[List[int]]:
+        batches = list(self._batches)
+        if self._shuffle:
+            g = torch.Generator()
+            g.manual_seed(self._seed + self._epoch)
+            perm = torch.randperm(len(batches), generator=g).tolist()
+            batches = [batches[i] for i in perm]
+        self._epoch += 1
+        return iter(batches)
+
+    def __len__(self) -> int:
+        return len(self._batches)
+
+
 @dataclass
 class UCO3DDataModule:
-    """Builds train/val/test DataLoaders for uCO3D.
-
-    Configuration values are kept on the dataclass so callers can override
-    selectively without long arg lists at the call site.
-    """
     subset_lists_filename: str = "/home/nrieger/radiance-field-project/set_lists_all-categories.sqlite"
-    batch_size: int = 4
     num_workers: int = 4
     pin_memory: bool = True
     image_height: int = 800
@@ -24,8 +44,9 @@ class UCO3DDataModule:
     load_gaussian_splats: bool = True
     load_depths: bool = False
     load_masks: bool = False
+    single_sequence: bool = True
 
-    def _make_dataset(self, subsets: Sequence[str]):
+    def _make_dataset(self, subsets: Sequence[str]) -> UCO3DDataset:
         return make_uco3d_dataset(
             subsets=subsets,
             subset_lists_filename=self.subset_lists_filename,
@@ -34,19 +55,19 @@ class UCO3DDataModule:
             load_gaussian_splats=self.load_gaussian_splats,
             load_depths=self.load_depths,
             load_masks=self.load_masks,
+            single_sequence=self.single_sequence,
         )
 
     def _make_loader(self, subsets: Sequence[str], shuffle: bool) -> DataLoader:
         dataset = self._make_dataset(subsets)
+        sampler = SequenceBatchSampler(dataset, shuffle=shuffle)
         return DataLoader(
             dataset,
-            batch_size=self.batch_size,
-            shuffle=shuffle,
+            batch_sampler=sampler,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             collate_fn=uco3d_collate,
             persistent_workers=self.num_workers > 0,
-            drop_last=shuffle, 
         )
 
     def train_loader(self) -> DataLoader:

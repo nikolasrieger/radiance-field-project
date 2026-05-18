@@ -1,6 +1,8 @@
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
 from models.minipointnet import MiniPointNet2DGSNetwork
 import torch
-import os
 import torch.nn.functional as F
 from torch.optim import AdamW
 from data.datamodule import UCO3DDataModule
