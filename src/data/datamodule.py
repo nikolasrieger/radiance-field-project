@@ -37,7 +37,7 @@ class SequenceBatchSampler(Sampler[List[int]]):
 @dataclass
 class UCO3DDataModule:
     subset_lists_filename: str = "/home/nrieger/radiance-field-project/set_lists_all-categories.sqlite"
-    num_workers: int = 4
+    num_workers: int = 0
     pin_memory: bool = True
     image_height: int = 800
     image_width: int = 800
@@ -78,3 +78,46 @@ class UCO3DDataModule:
 
     def test_loader(self) -> DataLoader:
         return self._make_loader(subsets=("test",), shuffle=False)
+
+    def splat_only_loader(self) -> DataLoader:
+        dataset = make_uco3d_dataset(
+            subsets=("train",),
+            subset_lists_filename=self.subset_lists_filename,
+            load_images=False,
+            load_depths=False,
+            load_masks=False,
+            load_gaussian_splats=True,
+            image_height=self.image_height,
+            image_width=self.image_width,
+            single_sequence=self.single_sequence,
+        )
+        sampler = SequenceBatchSampler(dataset, shuffle=False)
+        return DataLoader(
+            dataset,
+            batch_sampler=sampler,
+            num_workers=0,  
+            collate_fn=uco3d_collate,
+        )
+
+    def image_only_loader(self) -> DataLoader:
+        dataset = make_uco3d_dataset(
+            subsets=("train",),
+            subset_lists_filename=self.subset_lists_filename,
+            load_images=True,
+            load_depths=True,
+            load_masks=True,
+            load_gaussian_splats=False,
+            image_height=self.image_height,
+            image_width=self.image_width,
+            single_sequence=self.single_sequence,
+        )
+        sampler = SequenceBatchSampler(dataset, shuffle=True)
+        return DataLoader(
+            dataset,
+            batch_sampler=sampler,
+            num_workers=4,
+            prefetch_factor=2,
+            pin_memory=True,
+            persistent_workers=True,
+            collate_fn=uco3d_collate,
+        )

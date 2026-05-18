@@ -20,7 +20,7 @@ def make_uco3d_dataset(
     box_crop: bool = True,
     image_height: int = 800,
     image_width: int = 800,
-    single_sequence: bool = True,
+    single_sequence: bool = True
 ) -> UCO3DDataset:
     """Build a UCO3DDataset with project-level defaults.
 
