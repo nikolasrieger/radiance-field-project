@@ -6,7 +6,8 @@ from torch import nn
 from src.data.datamodule import UCO3DDataModule
 from src.utils.splat_visualizer import SplatRenderVisualizer
 from src.utils.rendering import get_camera_params, render_2dgs
-from src.models.gaussian_head import get_model
+from src.models.gaussian_head import SplatRefiner
+from src.utils.gaussian_ops import to_2dgs_canonical
 from src.utils.losses import reconstruction_loss
 
 os.environ["UCO3D_DATASET_ROOT"] = "/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw"
@@ -38,15 +39,17 @@ raw_splats = training_frames[0]["sequence_gaussian_splats"][0]
 # ── input splats (3DGS from uCO3D) — we initialise 2DGS from these ───────────
 means_init     = raw_splats.means.to(DEVICE).detach().float()       # (N, 3)
 sh0_init       = raw_splats.sh0.to(DEVICE).detach().float()         # (N, 3)
-scales_init    = raw_splats.scales.to(DEVICE).detach().float()      # (N, 3)
-scales2d_init  = scales_init[:, :2]                                 # (N, 2)  drop depth
-quats_init     = raw_splats.quats.to(DEVICE).detach().float()       # (N, 4)
+scales_init    = raw_splats.scales.to(DEVICE).detach().float()      # (N, 3) log
+quats_init     = raw_splats.quats.to(DEVICE).detach().float()       # (N, 4) [w,x,y,z]
+# Canonicalize: move the smallest-axis log-scale to position 2 and rotate the
+# quat to match, so dropping the last scale axis gives the true 2DGS disk.
+scales2d_init, quats_init = to_2dgs_canonical(scales_init, quats_init)
 opacities_init = raw_splats.opacities.to(DEVICE).detach().float()   # (N,)
 
 view_data = [get_camera_params(f, DEVICE) for f in training_frames]
 
 # ── model + optimiser ─────────────────────────────────────────────────────────
-network   = get_model().to(DEVICE)
+network   = SplatRefiner(output_format="2dgs").to(DEVICE)
 optimizer = AdamW(network.parameters(), lr=LR)
 
 # ── reference render: original splat rendered as 2DGS (no grad) ───────────────

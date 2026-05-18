@@ -7,7 +7,7 @@ from src.data.datamodule import UCO3DDataModule
 from src.utils.splat_visualizer import SplatRenderVisualizer
 from src.utils.rendering import get_camera_params, render
 from src.utils.losses import l2_loss
-from src.models.gaussian_head import get_model
+from src.models.gaussian_head import SplatRefiner
 
 os.environ["UCO3D_DATASET_ROOT"] = "/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw"
 
@@ -49,7 +49,7 @@ input_splats = GaussianSplats(
 view_data = [get_camera_params(f, DEVICE) for f in training_frames]
 
 # ── model + optimiser ─────────────────────────────────────────────────────────
-network   = get_model().to(DEVICE)
+network   = SplatRefiner(output_format="3dgs").to(DEVICE)
 optimizer = AdamW(network.parameters(), lr=LR)
 
 # ── reference render (no grad) ────────────────────────────────────────────────
