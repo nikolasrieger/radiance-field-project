@@ -45,3 +45,4 @@ uco3d = { git = "https://github.com/facebookresearch/uco3d.git", rev = "b17b2afc
 
 [project.scripts]
 download-dataset = "radiance_field_project.data.dataset_download.download_dataset:main"
+training = "radiance_field_project.training.train:main"

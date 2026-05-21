@@ -124,12 +124,20 @@ class SplatRefiner(nn.Module):
         "2dgs": (13, GaussianHead2DGS),
     }
 
+    # Spatial subsampling params for each SA stage (the final stage is
+    # always group_all=True and ignores these).
+    _SA_SPATIAL = [
+        dict(npoint=512, radius=0.2, nsample=32),
+        dict(npoint=128, radius=0.4, nsample=64),
+    ]
+
     def __init__(self,
                  output_format: str = "3dgs",
+                 encoder=(128, 256, 1024),
+                 decoder=(512, 256, 128),
                  normal_channel: bool = False,
                  init_scale: float = 0.01,
                  init_opacity: float = 0.1,
-                 hidden_dim: int = 128,
                  freeze_encoder: bool = False):
         super().__init__()
         if output_format not in self._FORMATS:
@@ -139,21 +147,40 @@ class SplatRefiner(nn.Module):
         self.output_format = output_format
         splat_dim, HeadCls = self._FORMATS[output_format]
 
+        encoder = list(encoder)
+        decoder = list(decoder)
+        if len(encoder) != 3:
+            raise ValueError(
+                f"encoder must have length 3 (SA1, SA2, SA_group_all); "
+                f"got {len(encoder)}")
+        if len(decoder) == 0:
+            raise ValueError("decoder must contain at least one width")
+
         in_channel = 6 if normal_channel else 3
         self.normal_channel = normal_channel
 
-        self.sa1 = PointNetSetAbstraction(
-            npoint=512, radius=0.2, nsample=32,
-            in_channel=in_channel,
-            mlp=[64, 64, 128], group_all=False)
-        self.sa2 = PointNetSetAbstraction(
-            npoint=128, radius=0.4, nsample=64,
-            in_channel=128 + 3,
-            mlp=[128, 128, 256], group_all=False)
-        self.sa3 = PointNetSetAbstraction(
-            npoint=None, radius=None, nsample=None,
-            in_channel=256 + 3,
-            mlp=[256, 512, 1024], group_all=True)
+        # Build SA stack — each stage's internal MLP expands prev→prev→out.
+        sa_modules = []
+        prev_out = in_channel
+        for i, out_dim in enumerate(encoder):
+            is_last = (i == len(encoder) - 1)
+            spatial = (
+                dict(npoint=None, radius=None, nsample=None, group_all=True)
+                if is_last
+                else {**self._SA_SPATIAL[i], "group_all": False}
+            )
+            # SA input channel: raw `in_channel` for the first stage; for
+            # later stages PointNet++ concatenates xyz, so prev_out + 3.
+            sa_in = in_channel if i == 0 else prev_out + 3
+            mid = max(out_dim // 2, 1)
+            sa_modules.append(PointNetSetAbstraction(
+                in_channel=sa_in,
+                mlp=[mid, mid, out_dim],
+                **spatial,
+            ))
+            prev_out = out_dim
+        self.sa1, self.sa2, self.sa3 = sa_modules
+        global_feat_dim = encoder[-1]
 
         if freeze_encoder:
             for p in list(self.sa1.parameters()) \
@@ -161,16 +188,20 @@ class SplatRefiner(nn.Module):
                    + list(self.sa3.parameters()):
                 p.requires_grad_(False)
 
-        self.trunk = nn.Sequential(
-            nn.LayerNorm(1024 + splat_dim),
-            nn.Linear(1024 + splat_dim, 512),
-            nn.LayerNorm(512), nn.ReLU(),
-            nn.Linear(512, 256),
-            nn.LayerNorm(256), nn.ReLU(),
-            nn.Linear(256, hidden_dim), nn.ReLU(),
-        )
+        # Build the per-point trunk from `decoder`. Pattern matches the
+        # original: LayerNorm input, then Linear→LayerNorm→ReLU for each
+        # decoder width, omitting the LayerNorm on the final layer.
+        trunk_layers = [nn.LayerNorm(global_feat_dim + splat_dim)]
+        prev = global_feat_dim + splat_dim
+        for j, width in enumerate(decoder):
+            trunk_layers.append(nn.Linear(prev, width))
+            if j < len(decoder) - 1:
+                trunk_layers.append(nn.LayerNorm(width))
+            trunk_layers.append(nn.ReLU())
+            prev = width
+        self.trunk = nn.Sequential(*trunk_layers)
 
-        self.head = HeadCls(hidden_dim,
+        self.head = HeadCls(decoder[-1],
                             init_scale=init_scale,
                             init_opacity=init_opacity)
 
@@ -203,17 +234,22 @@ class SplatRefiner(nn.Module):
         return global_feat, centroid, scale
 
     def reconstruct_splats(self, splats: GaussianSplats) -> GaussianSplats:
-        """3DGS path. Returns a refined ``GaussianSplats``."""
-        if self.output_format != "3dgs":
-            raise RuntimeError(
-                f"reconstruct_splats requires output_format='3dgs', "
-                f"this refiner is '{self.output_format}'")
+        """Refine ``splats`` and return a ``GaussianSplats`` of the same layout.
+
+        Works for both ``output_format='3dgs'`` and ``'2dgs'``. For 2dgs only
+        the first two scale columns are refined; the third column is
+        re-emitted with a log-space sentinel value so the returned tensor
+        keeps a uniform ``(N, 3)`` shape (``render_view`` slices it back to
+        2D for 2dgs rasterization).
+        """
+        is_2dgs = self.output_format == "2dgs"
+        scale_dim = 2 if is_2dgs else 3
 
         means     = splats.means
         sh0       = splats.sh0
-        scales    = splats.scales
         quats     = splats.quats
         opacities = splats.opacities
+        scales_in = splats.scales[:, :scale_dim]
 
         N = means.shape[0]
         global_feat, centroid, cloud_scale = self.encode_multiscale(means.unsqueeze(0))
@@ -221,8 +257,8 @@ class SplatRefiner(nn.Module):
         means_normed = (means - centroid[0, 0]) / (cloud_scale[0, 0] + 1e-8)
 
         flat = torch.cat([
-            means_normed, sh0, scales, quats, opacities.unsqueeze(-1)
-        ], dim=-1)                                                # (N, 14)
+            means_normed, sh0, scales_in, quats, opacities.unsqueeze(-1)
+        ], dim=-1)                                                # (N, 13|14)
         feats = self.trunk(torch.cat([global_feat, flat], dim=-1))
 
         out = self.head(
@@ -230,51 +266,29 @@ class SplatRefiner(nn.Module):
             anchor_means=means,
             anchor_sh0=sh0,
             anchor_opacity_logit=opacities.unsqueeze(-1),
-            anchor_log_scale=scales,
+            anchor_log_scale=scales_in,
             anchor_quats=quats,
-        )                                                         # (N, 14)
+        )                                                         # (N, 13|14)
+
+        means_r = out[..., 0:3]
+        sh0_r = out[..., 3:6]
+        opacity_r = out[..., 6]
+        scales_r = out[..., 7:7 + scale_dim]
+        quats_r = out[..., 7 + scale_dim:11 + scale_dim]
+
+        if is_2dgs:
+            z = torch.full(
+                (scales_r.shape[0], 1), -10.0,
+                device=scales_r.device, dtype=scales_r.dtype,
+            )
+            scales_r = torch.cat([scales_r, z], dim=-1)
 
         return GaussianSplats(
-            means     = out[..., 0:3],
-            sh0       = out[..., 3:6],
-            opacities = out[..., 6],
-            scales    = out[..., 7:10],
-            quats     = out[..., 10:14],
+            means     = means_r,
+            sh0       = sh0_r,
+            opacities = opacity_r,
+            scales    = scales_r,
+            quats     = quats_r,
             shN       = splats.shN,
             fg_mask   = splats.fg_mask,
-        )
-
-    def reconstruct_splats_2dgs(self, means, sh0, scales2d, quats, opacities):
-        """2DGS path. Returns a dict with ``means``, ``sh0``, ``scales2d``,
-        ``quats``, ``opacities`` (all per-point, gradient-tracked)."""
-        if self.output_format != "2dgs":
-            raise RuntimeError(
-                f"reconstruct_splats_2dgs requires output_format='2dgs', "
-                f"this refiner is '{self.output_format}'")
-
-        N = means.shape[0]
-        global_feat, centroid, cloud_scale = self.encode_multiscale(means.unsqueeze(0))
-        global_feat = global_feat.expand(N, -1)
-        means_normed = (means - centroid[0, 0]) / (cloud_scale[0, 0] + 1e-8)
-
-        flat = torch.cat([
-            means_normed, sh0, scales2d, quats, opacities.unsqueeze(-1)
-        ], dim=-1)                                                # (N, 13)
-        feats = self.trunk(torch.cat([global_feat, flat], dim=-1))
-
-        out = self.head(
-            feats,
-            anchor_means=means,
-            anchor_sh0=sh0,
-            anchor_opacity_logit=opacities.unsqueeze(-1),
-            anchor_log_scale=scales2d,
-            anchor_quats=quats,
-        )                                                         # (N, 13)
-
-        return dict(
-            means     = out[..., 0:3],
-            sh0       = out[..., 3:6],
-            opacities = out[..., 6],
-            scales2d  = out[..., 7:9],
-            quats     = out[..., 9:13],
         )

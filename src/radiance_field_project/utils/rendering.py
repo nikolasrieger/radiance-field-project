@@ -1,6 +1,7 @@
 import torch
 from gsplat import rasterization, rasterization_2dgs
 import torch.nn.functional as F
+from uco3d import GaussianSplats
 from uco3d.dataset_utils.utils import opencv_cameras_projection_from_uco3d
 
 
@@ -32,62 +33,97 @@ def get_camera_params(sample, device, ret_normals=False):
     return viewmats, K, gt_image, fg_mask, h, w
 
 
-def render(means, quats, scales, opacities, sh0, viewmats, K, h, w, device):
-    imgs, _, _ = rasterization(
-        means          = means,
-        quats          = F.normalize(quats, p=2, dim=-1),
-        scales         = torch.exp(scales),
-        opacities      = torch.sigmoid(opacities.flatten()),
-        colors         = sh0.unsqueeze(1), 
-        viewmats       = viewmats,
-        Ks             = K,
-        width          = w,
-        height         = h,
-        sh_degree      = 0,
-        near_plane     = 0.01,
-        backgrounds    = torch.zeros(1, 3, device=device),
-        packed         = False,
-        absgrad        = False,
-        sparse_grad    = False,
-        rasterize_mode = "classic",
-        distributed    = False,
+def render_view(
+    splats: GaussianSplats,
+    viewmats: torch.Tensor,
+    Ks: torch.Tensor,
+    width: int,
+    height: int,
+    output_type: str = "3dgs",
+    device=None,
+    ret_normals: bool = False,
+):
+    """Rasterize a ``GaussianSplats`` to RGB, branching on ``output_type``.
+
+    For ``2dgs`` the third column of ``splats.scales`` is ignored; the caller is
+    free to pad it with a sentinel value. Returns ``(C, 3, H, W)`` RGB by
+    default. If ``ret_normals=True`` (2dgs only) returns ``(rgb, normals)``
+    where ``normals`` is ``(C, 3, H, W)``.
+    """
+    if ret_normals and output_type != "2dgs":
+        raise ValueError("ret_normals=True is only supported for output_type='2dgs'")
+
+    device = device or splats.means.device
+    quats = F.normalize(splats.quats, p=2, dim=-1)
+    opacities = torch.sigmoid(splats.opacities.flatten())
+    if output_type == "3dgs":
+        scales = torch.exp(splats.scales)
+    elif output_type == "2dgs":
+        scales2d = torch.exp(splats.scales[:, :2])
+        z = torch.full(
+            (scales2d.shape[0], 1), 1e-4,
+            device=scales2d.device, dtype=scales2d.dtype,
+        )
+        scales = torch.cat([scales2d, z], dim=-1)
+    else:
+        raise ValueError(f"Unknown output_type: {output_type!r}")
+
+    common = dict(
+        means=splats.means,
+        quats=quats,
+        scales=scales,
+        opacities=opacities,
+        colors=splats.sh0.unsqueeze(1),
+        viewmats=viewmats,
+        Ks=Ks,
+        width=width,
+        height=height,
+        sh_degree=0,
+        near_plane=0.01,
+        backgrounds=torch.zeros(viewmats.shape[0], 3, device=device),
+        packed=False,
+        absgrad=False,
     )
-    return imgs.permute(0, 3, 1, 2)
+    if output_type == "3dgs":
+        imgs, _, _ = rasterization(
+            **common, sparse_grad=False, rasterize_mode="classic", distributed=False,
+        )
+        return imgs.permute(0, 3, 1, 2)
 
-
-def render_2dgs(means, quats, scales2d, opacities, sh0, viewmats, K, h, w, device, ret_normals=False):
-    out = rasterization_2dgs(
-        means       = means,
-        quats       = F.normalize(quats, p=2, dim=-1),
-        scales      = torch.cat([
-                          torch.exp(scales2d),
-                          torch.full((scales2d.shape[0], 1), 1e-4, device=scales2d.device),
-                      ], dim=-1),                        # (N, 3)
-        opacities   = torch.sigmoid(opacities.flatten()),
-        colors      = sh0.unsqueeze(1),                  # (N, 1, 3)
-        viewmats    = viewmats,
-        Ks          = K,
-        width       = w,
-        height      = h,
-        sh_degree   = 0,
-        near_plane  = 0.01,
-        backgrounds = torch.zeros(1, 3, device=device),
-        packed      = False,
-        absgrad     = False,
-    )
-    rgb = out[0].permute(0, 3, 1, 2)                    # (1, 3, H, W) always first
-
-    normals = None
+    out = rasterization_2dgs(**common)
+    rgb = out[0].permute(0, 3, 1, 2)
+    if not ret_normals:
+        return rgb
+    # The 2dgs rasterizer returns several auxiliary tensors after RGB; the
+    # surface-normal map is the first 3-channel one of them.
     for tensor in out[1:]:
         t = tensor.permute(0, 3, 1, 2) if tensor.dim() == 4 else tensor
-        if t.shape[1] == 3:
-            normals = t
-            break
-    
-    if normals is not None and ret_normals:
-        return rgb, normals
-    
-    return rgb
+        if t.dim() == 4 and t.shape[1] == 3:
+            return rgb, t
+    raise RuntimeError("rasterization_2dgs did not return a normal map")
+
+
+def world_normals_to_camera(normals: torch.Tensor, viewmats: torch.Tensor) -> torch.Tensor:
+    """Rotate per-pixel surface normals from world frame into camera frame.
+
+    The 2dgs rasterizer emits ``render_normals`` in world coordinates; the
+    depth-derived GT normals from :func:`depth_to_normals` live in the
+    camera coordinate frame. To compare them with an L1 loss they must
+    share a frame, so we apply the world->camera rotation block of each
+    ``viewmats`` row to its corresponding normal map.
+
+    Args:
+        normals:  ``(C, 3, H, W)`` world-frame normals.
+        viewmats: ``(C, 4, 4)`` world->camera transforms (R | t in the top
+            3 rows).
+
+    Returns:
+        ``(C, 3, H, W)`` camera-frame normals.
+    """
+    R = viewmats[:, :3, :3]            # (C, 3, 3)
+    C, _, H, W = normals.shape
+    flat = normals.reshape(C, 3, -1)   # (C, 3, H*W)
+    return (R @ flat).reshape(C, 3, H, W)
 
 
 def depth_to_normals(depth: torch.Tensor, K: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
@@ -123,10 +159,13 @@ def depth_to_normals(depth: torch.Tensor, K: torch.Tensor, valid: torch.Tensor) 
     dPdu = cdiff(xyz, dim=3)   # (B, 3, H, W)  horizontal tangent
     dPdv = cdiff(xyz, dim=2)   # (B, 3, H, W)  vertical tangent
 
-    # cross product: (B, 3, H, W)
+    # Cross product order is `dPdv × dPdu` (not the other way round) so the
+    # resulting normal points toward the camera (-Z in camera frame), matching
+    # the convention used by `rasterization_2dgs`'s `render_normals` once it's
+    # rotated into camera frame by `world_normals_to_camera`.
     normals = torch.cross(
-        dPdu.permute(0, 2, 3, 1),
         dPdv.permute(0, 2, 3, 1),
+        dPdu.permute(0, 2, 3, 1),
         dim=-1,
     ).permute(0, 3, 1, 2)
 

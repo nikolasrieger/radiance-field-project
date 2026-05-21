@@ -11,3 +11,11 @@ def load_config(yaml_path: str | Path, overrides: list[str] | None = None):
     if overrides:
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(overrides))
     return cfg
+
+def parse_cli() -> DictConfig:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True, type=str)
+    parser.add_argument("overrides", nargs="*",
+                        help="key=value pairs, e.g. train.lr=1e-4")
+    args = parser.parse_args()
+    return load_config(args.config, args.overrides)

@@ -20,7 +20,7 @@ def make_uco3d_dataset(
     box_crop: bool = True,
     image_height: int = 800,
     image_width: int = 800,
-    single_sequence: bool = True
+    pick_sequences: Sequence[str] | None = None,
 ) -> UCO3DDataset:
     """Build a UCO3DDataset with project-level defaults.
 
@@ -33,6 +33,9 @@ def make_uco3d_dataset(
             for faster iteration and lower memory.
         box_crop: Crop images around the object bounding box.
         image_height/width: Output resolution after cropping/resizing.
+        pick_sequences: Restrict the dataset to these sequence names (useful
+            for single/multi-sequence overfit runs). ``None`` or an empty
+            sequence loads the full subset.
     """
     subset_lists_file = Path(UCO3D_DATASET_ROOT) / "set_lists" / subset_lists_filename
     if not subset_lists_file.exists():
@@ -53,16 +56,12 @@ def make_uco3d_dataset(
         image_width=image_width,
     )
 
-    if single_sequence:
-        return UCO3DDataset(
-            subset_lists_file=str(subset_lists_file),
-            subsets=list(subsets),
-            frame_data_builder=frame_data_builder,
-            pick_sequences=('26-14460-30571',),
-        )
-
-    return UCO3DDataset(
+    kwargs = dict(
         subset_lists_file=str(subset_lists_file),
         subsets=list(subsets),
         frame_data_builder=frame_data_builder,
     )
+    if pick_sequences:
+        kwargs["pick_sequences"] = tuple(pick_sequences)
+
+    return UCO3DDataset(**kwargs)

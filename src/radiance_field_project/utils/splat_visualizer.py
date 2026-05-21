@@ -193,8 +193,17 @@ class SplatRenderVisualizer:
         render_alphas: Optional[torch.Tensor] = None,
         batch_index: int = 0,
         composite_background: Optional[float] = None,
+        labels: Optional[Sequence[str]] = None,
+        columns: Optional[int] = None,
     ) -> None:
-        """Save the RGB render to ``path`` as an 8-bit image (PNG/JPEG/...)."""
+        """Save the RGB render to ``path`` as an 8-bit image (PNG/JPEG/...).
+
+        If ``labels`` is provided the image is treated as a grid of equal
+        panels and each label is drawn in the top-left corner of its panel.
+        With ``columns=None`` the panels are assumed to lie in a single
+        horizontal row; pass an explicit ``columns`` to lay out the labels
+        on a ``len(labels)/columns``-row grid.
+        """
         from PIL import Image  # local import keeps Pillow optional
 
         rgb, alpha = cls.to_numpy(render_colors, render_alphas, batch_index)
@@ -202,4 +211,32 @@ class SplatRenderVisualizer:
             rgb = cls._composite_on_background(rgb, alpha, composite_background)
 
         img = (rgb * 255.0).round().astype(np.uint8)
-        Image.fromarray(img).save(path)
+        pil = Image.fromarray(img)
+
+        if labels:
+            from PIL import ImageDraw, ImageFont
+
+            draw = ImageDraw.Draw(pil)
+            H, W = img.shape[:2]
+            cols = columns or len(labels)
+            rows = (len(labels) + cols - 1) // cols
+            panel_w = W // cols
+            panel_h = H // rows
+            font_size = max(12, panel_w // 24)
+            try:
+                font = ImageFont.truetype("DejaVuSans-Bold.ttf", size=font_size)
+            except OSError:
+                font = ImageFont.load_default()
+            pad = max(6, font_size // 2)
+            for i, label in enumerate(labels):
+                r, c = divmod(i, cols)
+                x, y = c * panel_w + pad, r * panel_h + pad
+                # Black outline for legibility on bright backgrounds.
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        if dx or dy:
+                            draw.text((x + dx, y + dy), label,
+                                      fill=(0, 0, 0), font=font)
+                draw.text((x, y), label, fill=(255, 255, 255), font=font)
+
+        pil.save(path)
