@@ -1,12 +1,11 @@
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import os
 
-from models.minipointnet import MiniPointNet2DGSNetwork
-from data.datamodule import UCO3DDataModule
+from radiance_field_project.models.minipointnet import MiniPointNet2DGSNetwork
+from radiance_field_project.data.datamodule import UCO3DDataModule
 from uco3d.dataset_utils.data_types import Cameras
-from utils.splat_visualizer import SplatRenderVisualizer
-from utils.losses import reconstruction_loss
-from utils.rendering import render_2dgs, render, get_camera_params
+from radiance_field_project.utils.splat_visualizer import SplatRenderVisualizer
+from radiance_field_project.utils.losses import reconstruction_loss
+from radiance_field_project.utils.rendering import render_2dgs, render, get_camera_params
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW

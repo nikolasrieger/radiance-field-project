@@ -7,20 +7,17 @@ Usage (from project root):
         uv run python scripts/test_sequence_loader.py
 """
 import os
-import sys
 
 os.environ.setdefault(
     "UCO3D_DATASET_ROOT",
     "/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw",
 )
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
 import math
 import matplotlib.pyplot as plt
 import torch
 
-from data.datamodule import UCO3DDataModule
+from radiance_field_project.data.datamodule import UCO3DDataModule
 
 
 def plot_sequence(ax_row, batch, title_prefix: str) -> None:
