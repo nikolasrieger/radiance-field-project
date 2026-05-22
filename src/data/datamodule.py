@@ -1,7 +1,7 @@
 """DataLoader construction for uCO3D."""
 import torch
 from dataclasses import dataclass
-from typing import Iterator, List, Sequence
+from typing import Iterator, List, Optional, Sequence
 
 from torch.utils.data import DataLoader, Sampler
 from uco3d import UCO3DDataset
@@ -11,11 +11,31 @@ from src.data.dataset import make_uco3d_dataset
 
 
 class SequenceBatchSampler(Sampler[List[int]]):
-    def __init__(self, dataset: UCO3DDataset, shuffle: bool = False, seed: int = 0) -> None:
-        self._batches: List[List[int]] = [
-            list(dataset.sequence_indices_in_order(seq))
-            for seq in dataset.sequence_names()
-        ]
+    def __init__(
+        self,
+        dataset: UCO3DDataset,
+        shuffle: bool = False,
+        seed: int = 0,
+        max_splats: Optional[int] = None,
+    ) -> None:
+        self._batches: List[List[int]] = []
+        skipped = 0
+        for seq in dataset.sequence_names():
+            indices = list(dataset.sequence_indices_in_order(seq))
+            if max_splats is not None:
+                frame = dataset[indices[0]]
+                splats = frame.sequence_gaussian_splats
+                if splats is not None and splats.means.shape[0] >= max_splats:
+                    skipped += 1
+                    continue
+            self._batches.append(indices)
+        if max_splats is not None:
+            print(f"SequenceBatchSampler: kept {len(self._batches)} sequences, skipped {skipped} with >= {max_splats} splats")
+            if not self._batches:
+                raise RuntimeError(
+                    f"All sequences were filtered out (max_splats={max_splats}). "
+                    "Lower the threshold or check that gaussian splats are loaded."
+                )
         self._shuffle = shuffle
         self._seed = seed
         self._epoch = 0
@@ -58,9 +78,9 @@ class UCO3DDataModule:
             single_sequence=self.single_sequence,
         )
 
-    def _make_loader(self, subsets: Sequence[str], shuffle: bool) -> DataLoader:
+    def _make_loader(self, subsets: Sequence[str], shuffle: bool, max_splats: Optional[int] = None) -> DataLoader:
         dataset = self._make_dataset(subsets)
-        sampler = SequenceBatchSampler(dataset, shuffle=shuffle)
+        sampler = SequenceBatchSampler(dataset, shuffle=shuffle, max_splats=max_splats)
         return DataLoader(
             dataset,
             batch_sampler=sampler,
@@ -70,16 +90,16 @@ class UCO3DDataModule:
             persistent_workers=self.num_workers > 0,
         )
 
-    def train_loader(self) -> DataLoader:
-        return self._make_loader(subsets=("train",), shuffle=True)
+    def train_loader(self, max_splats: Optional[int] = None) -> DataLoader:
+        return self._make_loader(subsets=("train",), shuffle=True, max_splats=max_splats)
 
-    def val_loader(self) -> DataLoader:
-        return self._make_loader(subsets=("val",), shuffle=False)
+    def val_loader(self, max_splats: Optional[int] = None) -> DataLoader:
+        return self._make_loader(subsets=("val",), shuffle=False, max_splats=max_splats)
 
-    def test_loader(self) -> DataLoader:
-        return self._make_loader(subsets=("test",), shuffle=False)
+    def test_loader(self, max_splats: Optional[int] = None) -> DataLoader:
+        return self._make_loader(subsets=("test",), shuffle=False, max_splats=max_splats)
 
-    def splat_only_loader(self) -> DataLoader:
+    def splat_only_loader(self, max_splats: Optional[int] = None) -> DataLoader:
         dataset = make_uco3d_dataset(
             subsets=("train",),
             subset_lists_filename=self.subset_lists_filename,
@@ -91,11 +111,11 @@ class UCO3DDataModule:
             image_width=self.image_width,
             single_sequence=self.single_sequence,
         )
-        sampler = SequenceBatchSampler(dataset, shuffle=False)
+        sampler = SequenceBatchSampler(dataset, shuffle=False, max_splats=max_splats)
         return DataLoader(
             dataset,
             batch_sampler=sampler,
-            num_workers=0,  
+            num_workers=0,
             collate_fn=uco3d_collate,
         )
 

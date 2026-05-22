@@ -82,11 +82,14 @@ class MiniPointNet2DGSNetwork(nn.Module):
             nn.Linear(512, 1024),
         )
 
+        out_layer = nn.Linear(128, splat_dim)
+        nn.init.zeros_(out_layer.weight)
+        nn.init.zeros_(out_layer.bias)
         self.decoder = nn.Sequential(
             nn.Linear(1024 + splat_dim, 512), nn.LayerNorm(512), nn.ReLU(),
             nn.Linear(512, 256),              nn.LayerNorm(256), nn.ReLU(),
             nn.Linear(256, 128),                                 nn.ReLU(),
-            nn.Linear(128, splat_dim),
+            out_layer,
         )
 
     def encode(self, means_b: torch.Tensor) -> torch.Tensor:

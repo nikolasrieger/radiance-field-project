@@ -3,6 +3,7 @@ import os
 import torch.nn.functional as F
 from torch.optim import AdamW
 from src.data.datamodule import UCO3DDataModule
+from uco3d.dataset_utils.data_types import Cameras
 from src.utils.splat_visualizer import SplatRenderVisualizer
 from src.utils.losses import reconstruction_loss
 from src.utils.rendering import render_2dgs, render, get_camera_params
@@ -15,27 +16,62 @@ EPOCHS         = 10000
 LR             = 1e-4
 NUM_VIEWS      = 10
 LOG_EVERY      = 50
-LAMBDA_SSIM    = 0.2    # weight of SSIM in reconstruction loss
 LAMBDA_NORMAL  = 0.2   # weight of normal consistency loss
 DEVICE         = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {DEVICE}")
 
 # ── data ──────────────────────────────────────────────────────────────────────
 dm = UCO3DDataModule(
-    subset_lists_filename="/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw/set_lists/set_lists_all-categories.sqlite",
-    batch_size=1, num_workers=0,
+    num_workers=0,
     image_height=512, image_width=512,
     load_masks=True,
     load_depths=True,
 )
+def _slice_frame(batch: dict, i: int) -> dict:
+    cam = batch["camera"]
+    img_size = cam.image_size
+    if torch.is_tensor(img_size):
+        img_size = img_size[i : i + 1]
+    sliced_cam = Cameras(
+        R=cam.R[i : i + 1],
+        T=cam.T[i : i + 1],
+        focal_length=cam.focal_length[i : i + 1],
+        principal_point=cam.principal_point[i : i + 1],
+        colmap_distortion_coeffs=cam.colmap_distortion_coeffs[i : i + 1],
+        device=cam.device,
+        in_ndc=cam.in_ndc,
+        image_size=img_size,
+    )
+    dsa = batch["depth_scale_adjustment"]
+    return {
+        "image_rgb":              batch["image_rgb"][i : i + 1],
+        "fg_probability":         batch["fg_probability"][i : i + 1],
+        "camera":                 sliced_cam,
+        "depth_map":              batch["depth_map"][i : i + 1],
+        "depth_mask":             batch["depth_mask"][i : i + 1],
+        "depth_scale_adjustment": dsa[i : i + 1] if torch.is_tensor(dsa) else dsa,
+    }
+
+
 torch.manual_seed(1)
-train_loader    = dm.train_loader()
+train_loader = dm.train_loader(max_splats=500_000)
 print(f"Dataset size: {len(train_loader.dataset)}")
 
-train_iter      = iter(train_loader)
-training_frames = [next(train_iter) for _ in range(NUM_VIEWS)]
+seq_batch = None
+for batch in train_loader:
+    seq_batch = batch
+    break
 
-raw_splats = training_frames[0]["sequence_gaussian_splats"][0]
+if seq_batch is None:
+    raise RuntimeError("No sequences passed the splat filter — lower max_splats or check the dataset.")
+
+raw_splats = seq_batch["sequence_gaussian_splats"][0]
+
+T    = seq_batch["image_rgb"].shape[0]
+step = max(1, T // NUM_VIEWS)
+training_frames = [_slice_frame(seq_batch, i) for i in range(0, T, step)[:NUM_VIEWS]]
+NUM_VIEWS = len(training_frames)
+print(f"Loaded {NUM_VIEWS} frames from 1 sequence ({T} total)")
 
 # ── input splats (3DGS from uCO3D) ───────────────────────────────────────────
 means_init     = raw_splats.means.to(DEVICE).detach().float()       # (N, 3)
@@ -72,7 +108,7 @@ with torch.no_grad():
 # GT normals come from depth maps (one per view, already on device)
 gt_normals_vis = (v0_gt_normals * 0.5 + 0.5).clamp(0, 1)  # [-1,1] → [0,1] for vis
 
-os.makedirs("logs_2dgs_minipointnet_normal", exist_ok=True)
+os.makedirs("logs_2dgs_pointnet_normal_ghead", exist_ok=True)
 
 # ── training loop ─────────────────────────────────────────────────────────────
 for epoch in range(EPOCHS):

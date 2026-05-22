@@ -7,6 +7,7 @@ from uco3d.dataset_utils.data_types import Cameras
 from utils.splat_visualizer import SplatRenderVisualizer
 from utils.losses import reconstruction_loss
 from utils.rendering import render_2dgs, render, get_camera_params
+from utils.gaussian_ops import to_2dgs_canonical
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
@@ -16,11 +17,12 @@ os.environ["UCO3D_DATASET_ROOT"] = "/mnt/hdd/lkuech/repos/radiance-field-project
 # ── hyperparams ───────────────────────────────────────────────────────────────
 EPOCHS        = 10_000
 LR            = 1e-4
-NUM_SEQUENCES = 5      # ← increase to train on more sequences
+NUM_SEQUENCES = 1     # ← increase to train on more sequences
 NUM_VIEWS     = 10     # views sampled per sequence (evenly spaced)
 LOG_EVERY     = 20
-LAMBDA_NORMAL = 0.2
-MAX_POINTS    = 100_000
+LAMBDA_NORMAL = 0.8
+MAX_POINTS    = 150_000 
+MAX_SPLATS    = 260_000  # skip sequences with more splats than this
 DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 LOG_DIR       = "logs_2dgs_multiseq_normal"
 
@@ -84,10 +86,10 @@ dm = UCO3DDataModule(
 
 # ── step 1: preload Gaussians ONCE (no images, very fast) ────────────────────
 print("Preloading Gaussians into GPU cache...")
-splat_loader = dm.splat_only_loader()
+splat_loader = dm.splat_only_loader(max_splats=MAX_SPLATS)
 # Only load the FIRST frame of each sequence — splats are per-sequence, not per-frame
 splat_loader.batch_sampler._batches = [
-    b[:1] for b in splat_loader.batch_sampler._batches[:NUM_SEQUENCES]
+    b[:1] for b in splat_loader.batch_sampler._batches
 ]
 
 gaussian_cache = {}   # seq_name -> dict of GPU tensors
@@ -97,29 +99,39 @@ for batch in splat_loader:
     raw = batch["sequence_gaussian_splats"][0]
     # store FULL unsubsampled splats on CPU for the baseline render
     means     = raw.means.float()
-    sh0      = raw.sh0.float()
-    scales    = raw.scales.float()   # 3D scales — needed for render()
+    sh0       = raw.sh0.float()
+    scales    = raw.scales.float()
     quats     = raw.quats.float()
     opacities = raw.opacities.float()
+
+    # Canonicalize: rotate each splat so its smallest-scale axis lands at
+    # position 2, and adjust quats to match — identical to the ghead script.
+    min_log_scale        = scales.min(dim=-1, keepdim=True).values
+    scales2d, quats      = to_2dgs_canonical(scales, quats)
+    scales3d_canonical   = torch.cat([scales2d, min_log_scale], dim=-1)
 
     # keep on CPU — moved to GPU only during forward
     gaussian_cache[seq_name] = {
         "means":    means,
         "sh0":      sh0,
-        "scales3d": scales,          # full 3D scales — needed for the reference render
-        "scales2d": scales[:, :2],
-        "quats":    quats,
+        "scales3d": scales3d_canonical,   # canonical 3D for the reference render
+        "scales2d": scales2d,             # canonical 2D disk scales
+        "quats":    quats,                # rotated to match disk orientation
         "opacities": opacities,
     }
     print(f"  Cached Gaussians for '{seq_name}'  ({raw.means.shape[0]} points)")
+    if len(gaussian_cache) >= NUM_SEQUENCES:
+        break
 
 print(f"Gaussian cache ready: {len(gaussian_cache)} sequences.\n")
 
 # ── step 2: image-only loader — only NUM_VIEWS frames per sequence ────────────
 image_loader = dm.image_only_loader()
+_img_seq_names = list(image_loader.dataset.sequence_names())
 image_loader.batch_sampler._batches = [
     b[:: max(1, len(b) // NUM_VIEWS)][:NUM_VIEWS]
-    for b in image_loader.batch_sampler._batches[:NUM_SEQUENCES]
+    for seq, b in zip(_img_seq_names, image_loader.batch_sampler._batches)
+    if seq in gaussian_cache
 ]
 print(f"Image loader ready: {len(image_loader)} sequences, up to {NUM_VIEWS} frames each.\n")
 
@@ -217,9 +229,15 @@ for epoch in range(EPOCHS):
                         g_sub["opacities"], g_sub["sh0"],
                         v0_mats, v0_K, v0_h, v0_w, DEVICE,
                     )
+                    _, ref_normals = render_2dgs(
+                        g_sub["means"], g_sub["quats"], g_sub["scales2d"],
+                        g_sub["opacities"], g_sub["sh0"],
+                        v0_mats, v0_K, v0_h, v0_w, DEVICE, ret_normals=True,
+                    )
                     break
 
             eval_normals_vis = (eval_normals * 0.5 + 0.5).clamp(0, 1)
+            ref_normals_vis  = (ref_normals  * 0.5 + 0.5).clamp(0, 1)
             save_path = f"{LOG_DIR}/epoch_{epoch:05d}_seq{si:02d}.png"
             SplatRenderVisualizer.save(
                 save_path,
@@ -228,9 +246,10 @@ for epoch in range(EPOCHS):
                     ref_rgb.permute(0, 2, 3, 1),
                     eval_rgb.permute(0, 2, 3, 1),
                     (v0_gt_normals * 0.5 + 0.5).clamp(0, 1).permute(0, 2, 3, 1),
+                    ref_normals_vis.permute(0, 2, 3, 1),
                     eval_normals_vis.permute(0, 2, 3, 1),
                 ], dim=2),
-                render_alphas=torch.ones(1, v0_h, v0_w * 5, 1, device=DEVICE),
+                render_alphas=torch.ones(1, v0_h, v0_w * 6, 1, device=DEVICE),
             )
 
         print(
