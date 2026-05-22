@@ -1,6 +1,6 @@
 import torch.nn as nn
 import torch.nn.functional as F
-from models.pointnet2_utils import PointNetSetAbstraction
+from radiance_field_project.models.pointnet2_utils import PointNetSetAbstraction
 
 
 class get_model(nn.Module):

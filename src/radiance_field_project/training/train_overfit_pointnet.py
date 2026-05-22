@@ -2,18 +2,20 @@ import torch
 import os
 from torch.optim import AdamW
 from uco3d.dataset_utils.data_types import GaussianSplats
-from models.simple_recon_autoencoder import ReconAutoencoder
-from data.datamodule import UCO3DDataModule
-from utils.splat_visualizer import SplatRenderVisualizer
-from utils.rendering import get_camera_params, render
-from utils.losses import l2_loss
+from radiance_field_project.data.datamodule import UCO3DDataModule
+from radiance_field_project.utils.splat_visualizer import SplatRenderVisualizer
+from radiance_field_project.utils.rendering import get_camera_params, render
+from radiance_field_project.utils.losses import l2_loss
+from radiance_field_project.models.pointnet_autoencoder import PointNet2Network
 
 os.environ["UCO3D_DATASET_ROOT"] = "/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw"
 
-EPOCHS     = 10000
-LR         = 1e-4
-NUM_VIEWS  = 10
-DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+EPOCHS         = 10000
+LR             = 1e-4
+NUM_VIEWS      = 10
+POINTNET_CKPT  = "/mnt/hdd/lkuech/repos/radiance-field-project/checkpoints/classification/pointnet2_ssg_wo_normals/checkpoints/best_model.pth"
+NORMAL_CHANNEL = False
+DEVICE         = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {DEVICE}")
 
 # ── data ──────────────────────────────────────────────────────────────────────
@@ -22,7 +24,7 @@ torch.manual_seed(1)
 train_loader = dm.train_loader()
 print(f"Dataset size: {len(train_loader.dataset)}")
 
-train_iter     = iter(train_loader)
+train_iter      = iter(train_loader)
 training_frames = [next(train_iter) for _ in range(NUM_VIEWS)]
 
 raw_splats = training_frames[0]["sequence_gaussian_splats"][0]
@@ -37,10 +39,13 @@ input_splats = GaussianSplats(
     fg_mask   = None,
 )
 
-view_data = [get_camera_params(f, DEVICE) for f in training_frames]                 # (1, 3, H, W)
+view_data = [get_camera_params(f, DEVICE) for f in training_frames]
 
 # ── model + optimiser ─────────────────────────────────────────────────────────
-network   = ReconAutoencoder(14).to(DEVICE)
+network   = PointNet2Network(
+    pointnet_ckpt  = POINTNET_CKPT,
+    normal_channel = NORMAL_CHANNEL,
+).to(DEVICE)
 optimizer = AdamW(network.parameters(), lr=LR)
 
 # ── reference render (no grad) ────────────────────────────────────────────────
@@ -48,11 +53,8 @@ v0_mats, v0_K, v0_gt_image, v0_fg_mask, v0_h, v0_w = view_data[0]
 
 with torch.no_grad():
     ref_render = render(
-        input_splats.means,
-        input_splats.quats,
-        input_splats.scales,
-        input_splats.opacities,
-        input_splats.sh0,
+        input_splats.means, input_splats.quats, input_splats.scales,
+        input_splats.opacities, input_splats.sh0,
         v0_mats, v0_K, v0_h, v0_w, DEVICE
     )
 
@@ -67,11 +69,8 @@ for epoch in range(EPOCHS):
         recon = network.reconstruct_splats(input_splats)
 
         rendered = render(
-            recon.means,
-            recon.quats,
-            recon.scales,
-            recon.opacities,
-            recon.sh0,
+            recon.means, recon.quats, recon.scales,
+            recon.opacities, recon.sh0,
             v_mats, v_K, v_h, v_w, DEVICE
         )
 
@@ -82,28 +81,23 @@ for epoch in range(EPOCHS):
 
         total_epoch_loss += loss.item()
 
-    if epoch % 100 == 0:
+    if epoch % 20 == 0:
         avg_loss = total_epoch_loss / NUM_VIEWS
         network.eval()
         with torch.no_grad():
-            # Re-run reconstruction — don't reuse stale loop variable
             recon_eval = network.reconstruct_splats(input_splats)
             eval_rendered = render(
-                recon_eval.means,
-                recon_eval.quats,
-                recon_eval.scales,
-                recon_eval.opacities,
-                recon_eval.sh0,
+                recon_eval.means, recon_eval.quats, recon_eval.scales,
+                recon_eval.opacities, recon_eval.sh0,
                 v0_mats, v0_K, v0_h, v0_w, DEVICE
             )
             SplatRenderVisualizer.save(
-                "gt_vs_recon.png",
+                "gt_vs_recon_pointnet.png",
                 render_colors = torch.cat([
-                    v0_gt_image.permute(0, 2, 3, 1),               # GT
-                    ref_render.permute(0, 2, 3, 1),                 # original splats render
-                    eval_rendered.permute(0, 2, 3, 1),               # network reconstruction
+                    v0_gt_image.permute(0, 2, 3, 1),
+                    ref_render.permute(0, 2, 3, 1),
+                    eval_rendered.permute(0, 2, 3, 1),
                 ], dim=2),
                 render_alphas = torch.ones(1, v0_h, v0_w * 3, 1, device=DEVICE),
             )
-
         print(f"Epoch {epoch:05d}/{EPOCHS} | Avg Loss = {avg_loss:.6f}")

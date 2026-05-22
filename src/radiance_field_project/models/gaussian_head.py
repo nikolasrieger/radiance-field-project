@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.models.pointnet2_utils import (
+from radiance_field_project.models.pointnet2_utils import (
     PointNetSetAbstraction,
     farthest_point_sample,
     index_points,

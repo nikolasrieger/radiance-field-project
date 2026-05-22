@@ -2,13 +2,12 @@ import torch
 import os
 import torch.nn.functional as F
 from torch.optim import AdamW
-from src.data.datamodule import UCO3DDataModule
-from uco3d.dataset_utils.data_types import Cameras
-from src.utils.splat_visualizer import SplatRenderVisualizer
-from src.utils.losses import reconstruction_loss
-from src.utils.rendering import render_2dgs, render, get_camera_params
-from src.models.gaussian_head import SplatRefiner
-from src.utils.gaussian_ops import to_2dgs_canonical
+from radiance_field_project.data.datamodule import UCO3DDataModule
+from radiance_field_project.utils.splat_visualizer import SplatRenderVisualizer
+from radiance_field_project.utils.losses import reconstruction_loss
+from radiance_field_project.utils.rendering import render_2dgs, render, get_camera_params
+from radiance_field_project.models.gaussian_head import SplatRefiner
+from radiance_field_project.utils.gaussian_ops import to_2dgs_canonical
 
 os.environ["UCO3D_DATASET_ROOT"] = "/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw"
 

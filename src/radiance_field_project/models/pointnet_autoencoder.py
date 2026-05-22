@@ -3,7 +3,7 @@ from torch import nn
 import torch
 import sys
 sys.path.append('/path/to/Pointnet_Pointnet2_pytorch')
-from models.pointnet2_cls_ssg import get_model as get_pointnet2
+from radiance_field_project.models.pointnet2_cls_ssg import get_model as get_pointnet2
 
 class PointNet2Network(nn.Module):
     def __init__(self, pointnet_ckpt: str, normal_channel: bool = False):
@@ -42,7 +42,7 @@ class PointNet2Network(nn.Module):
         return l3_pts.view(xyz.shape[0], -1)               # (B, 1024)
 
     def encode_multiscale(self, means_b, normals=None):
-        from models.pointnet2_utils import farthest_point_sample, index_points
+        from radiance_field_project.models.pointnet2_utils import farthest_point_sample, index_points
 
         # ── Normalize to unit sphere (ModelNet40 training scale) ──
         centroid = means_b.mean(dim=1, keepdim=True)          # (1, 1, 3)

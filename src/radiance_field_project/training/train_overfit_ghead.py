@@ -1,25 +1,33 @@
 import torch
 import os
 from torch.optim import AdamW
+from torch import nn
 from uco3d.dataset_utils.data_types import GaussianSplats
-from data.datamodule import UCO3DDataModule
-from utils.splat_visualizer import SplatRenderVisualizer
-from utils.rendering import get_camera_params, render
-from utils.losses import l2_loss
-from models.pointnet_autoencoder import PointNet2Network
+from radiance_field_project.data.datamodule import UCO3DDataModule
+from radiance_field_project.utils.splat_visualizer import SplatRenderVisualizer
+from radiance_field_project.utils.rendering import get_camera_params, render
+from radiance_field_project.utils.losses import l2_loss
+from radiance_field_project.models.gaussian_head import SplatRefiner
 
 os.environ["UCO3D_DATASET_ROOT"] = "/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw"
 
 EPOCHS         = 10000
 LR             = 1e-4
 NUM_VIEWS      = 10
-POINTNET_CKPT  = "/mnt/hdd/lkuech/repos/radiance-field-project/checkpoints/classification/pointnet2_ssg_wo_normals/checkpoints/best_model.pth"
-NORMAL_CHANNEL = False
 DEVICE         = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+LOG_EVERY      = 50
 print(f"Device: {DEVICE}")
 
 # ── data ──────────────────────────────────────────────────────────────────────
-dm = UCO3DDataModule(batch_size=1, num_workers=0, image_height=512, image_width=512, load_masks=True)
+dm = UCO3DDataModule(
+    subset_lists_filename="/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw/set_lists/set_lists_all-categories.sqlite",
+    batch_size=1, 
+    num_workers=0, 
+    image_height=512, 
+    image_width=512, 
+    load_masks=True
+)
+
 torch.manual_seed(1)
 train_loader = dm.train_loader()
 print(f"Dataset size: {len(train_loader.dataset)}")
@@ -42,10 +50,7 @@ input_splats = GaussianSplats(
 view_data = [get_camera_params(f, DEVICE) for f in training_frames]
 
 # ── model + optimiser ─────────────────────────────────────────────────────────
-network   = PointNet2Network(
-    pointnet_ckpt  = POINTNET_CKPT,
-    normal_channel = NORMAL_CHANNEL,
-).to(DEVICE)
+network   = SplatRefiner(output_format="3dgs").to(DEVICE)
 optimizer = AdamW(network.parameters(), lr=LR)
 
 # ── reference render (no grad) ────────────────────────────────────────────────
@@ -81,7 +86,8 @@ for epoch in range(EPOCHS):
 
         total_epoch_loss += loss.item()
 
-    if epoch % 20 == 0:
+ # ── logging ───────────────────────────────────────────────────────────────
+    if epoch % LOG_EVERY == 0:
         avg_loss = total_epoch_loss / NUM_VIEWS
         network.eval()
         with torch.no_grad():
@@ -91,8 +97,9 @@ for epoch in range(EPOCHS):
                 recon_eval.opacities, recon_eval.sh0,
                 v0_mats, v0_K, v0_h, v0_w, DEVICE
             )
+            save_path = f"logs_3dgs_pointnet_ghead/epoch_{epoch:05d}.png"
             SplatRenderVisualizer.save(
-                "gt_vs_recon_pointnet.png",
+                save_path,
                 render_colors = torch.cat([
                     v0_gt_image.permute(0, 2, 3, 1),
                     ref_render.permute(0, 2, 3, 1),
