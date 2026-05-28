@@ -82,5 +82,4 @@ wandb/
 
 # Checkpoints
 checkpoints/
-configs/
 runs/

@@ -30,6 +30,11 @@ class LossType(Enum):
     l1_masked = "l1_masked"
 
 
+class ModelType(Enum):
+    pointnet2 = "pointnet2"
+    minipointnet = "minipointnet"
+
+
 @dataclass
 class RunConfig:
     name: str = "unnamed"
@@ -42,6 +47,9 @@ class RunConfig:
 
 @dataclass
 class DataConfig:
+    # Root directory of the uco3d dataset (must contain metadata.sqlite).
+    # Overrides the UCO3D_DATASET_ROOT environment variable when set.
+    dataset_root: str = ""
     num_supervision_views: int = 10
     image_height: int = 800
     image_width: int = 800
@@ -53,16 +61,24 @@ class DataConfig:
     load_gaussian_splats: bool = True
     # Empty list means "no pinning"; populate with sequence names to overfit a subset.
     pick_sequences: List[str] = field(default_factory=list)
+    # Skip sequences whose Gaussian splat count exceeds this. 0 = no limit.
+    max_splats: int = 0
+    # Subsample Gaussians to at most this many per forward pass. 0 = no limit.
+    max_points: int = 0
+    # Cap the number of sequences loaded into the Gaussian cache. 0 = all.
+    num_sequences: int = 0
 
 
 @dataclass
 class ModelConfig:
+    model_type: ModelType = ModelType.pointnet2
     output_type: OutputType = OutputType.gs3d
     # Output channel width of each PointNet++ SA stage. Length must be 3
     # (the final stage is group_all=True and produces the global feature).
+    # Only used when model_type=pointnet2.
     encoder: List[int] = field(default_factory=lambda: [128, 256, 1024])
     # Linear widths of the per-point trunk MLP. The last value is the head
-    # input dim. Variable length is supported.
+    # input dim. Variable length is supported. Only used when model_type=pointnet2.
     decoder: List[int] = field(default_factory=lambda: [512, 256, 128])
     init_scale: float = 0.01
     init_opacity: float = 0.1

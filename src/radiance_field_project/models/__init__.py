@@ -1,0 +1,1 @@
+from radiance_field_project.models.minipointnet import MiniPointNet3DGSNetwork, MiniPointNet2DGSNetwork

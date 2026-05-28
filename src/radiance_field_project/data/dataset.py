@@ -11,6 +11,7 @@ from radiance_field_project.utils.paths import UCO3D_DATASET_ROOT
 def make_uco3d_dataset(
     subsets: Sequence[str] = ("train",),
     subset_lists_filename: str = "set_lists_all-categories.sqlite",
+    dataset_root: str | None = None,
     apply_alignment: bool = True,
     load_images: bool = True,
     load_depths: bool = False,
@@ -37,14 +38,15 @@ def make_uco3d_dataset(
             for single/multi-sequence overfit runs). ``None`` or an empty
             sequence loads the full subset.
     """
-    subset_lists_file = Path(UCO3D_DATASET_ROOT) / "set_lists" / subset_lists_filename
+    p = Path(subset_lists_filename)
+    subset_lists_file = p if p.is_absolute() else Path(UCO3D_DATASET_ROOT) / "set_lists" / subset_lists_filename
     if not subset_lists_file.exists():
         raise FileNotFoundError(
             f"Subset list not found: {subset_lists_file}. "
             f"Check UCO3D_DATASET_ROOT and that the dataset is downloaded."
         )
 
-    frame_data_builder = UCO3DFrameDataBuilder(
+    builder_kwargs = dict(
         apply_alignment=apply_alignment,
         load_images=load_images,
         load_depths=load_depths,
@@ -55,6 +57,9 @@ def make_uco3d_dataset(
         image_height=image_height,
         image_width=image_width,
     )
+    if dataset_root:
+        builder_kwargs["dataset_root"] = dataset_root
+    frame_data_builder = UCO3DFrameDataBuilder(**builder_kwargs)
 
     kwargs = dict(
         subset_lists_file=str(subset_lists_file),
