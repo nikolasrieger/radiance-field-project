@@ -2,36 +2,39 @@ import torch
 import os
 import torch.nn.functional as F
 from torch.optim import AdamW
+import wandb
 from radiance_field_project.data.datamodule import UCO3DDataModule
 from radiance_field_project.utils.splat_visualizer import SplatRenderVisualizer
 from radiance_field_project.utils.losses import reconstruction_loss
 from radiance_field_project.utils.rendering import render_2dgs, render, get_camera_params
 from radiance_field_project.models.gaussian_head import SplatRefiner
 from radiance_field_project.utils.gaussian_ops import to_2dgs_canonical
+from uco3d.dataset_utils.data_types import Cameras
 
 os.environ["UCO3D_DATASET_ROOT"] = "/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw"
 
-EPOCHS         = 10000
-LR             = 1e-4
-NUM_VIEWS      = 10
-LOG_EVERY      = 50
-LAMBDA_NORMAL  = 0.2   # weight of normal consistency loss
-DEVICE         = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Device: {DEVICE}")
+# ── hyperparams ───────────────────────────────────────────────────────────────
+EPOCHS        = 600
+LR            = 1e-4
+NUM_SEQUENCES = 5
+NUM_VIEWS     = 10
+LOG_EVERY     = 20
+LAMBDA_NORMAL = 0.4
+MAX_POINTS    = 150_000
+MAX_SPLATS    = 500_000
+DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+LOG_DIR       = "logs_2dgs_pointnet_normal_ghead"
 
-# ── data ──────────────────────────────────────────────────────────────────────
-dm = UCO3DDataModule(
-    num_workers=0,
-    image_height=512, image_width=512,
-    load_masks=True,
-    load_depths=True,
-)
-def _slice_frame(batch: dict, i: int) -> dict:
-    cam = batch["camera"]
+print(f"Device: {DEVICE}  |  sequences: {NUM_SEQUENCES}  |  views/seq: {NUM_VIEWS}")
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _slice_camera(cam: Cameras, i: int) -> Cameras:
     img_size = cam.image_size
     if torch.is_tensor(img_size):
         img_size = img_size[i : i + 1]
-    sliced_cam = Cameras(
+    return Cameras(
         R=cam.R[i : i + 1],
         T=cam.T[i : i + 1],
         focal_length=cam.focal_length[i : i + 1],
@@ -41,137 +44,220 @@ def _slice_frame(batch: dict, i: int) -> dict:
         in_ndc=cam.in_ndc,
         image_size=img_size,
     )
+
+
+def slice_frame(batch: dict, i: int) -> dict:
     dsa = batch["depth_scale_adjustment"]
     return {
         "image_rgb":              batch["image_rgb"][i : i + 1],
         "fg_probability":         batch["fg_probability"][i : i + 1],
-        "camera":                 sliced_cam,
+        "camera":                 _slice_camera(batch["camera"], i),
         "depth_map":              batch["depth_map"][i : i + 1],
         "depth_mask":             batch["depth_mask"][i : i + 1],
         "depth_scale_adjustment": dsa[i : i + 1] if torch.is_tensor(dsa) else dsa,
     }
 
 
-torch.manual_seed(1)
-train_loader = dm.train_loader(max_splats=500_000)
-print(f"Dataset size: {len(train_loader.dataset)}")
-
-seq_batch = None
-for batch in train_loader:
-    seq_batch = batch
-    break
-
-if seq_batch is None:
-    raise RuntimeError("No sequences passed the splat filter — lower max_splats or check the dataset.")
-
-raw_splats = seq_batch["sequence_gaussian_splats"][0]
-
-T    = seq_batch["image_rgb"].shape[0]
-step = max(1, T // NUM_VIEWS)
-training_frames = [_slice_frame(seq_batch, i) for i in range(0, T, step)[:NUM_VIEWS]]
-NUM_VIEWS = len(training_frames)
-print(f"Loaded {NUM_VIEWS} frames from 1 sequence ({T} total)")
-
-# ── input splats (3DGS from uCO3D) ───────────────────────────────────────────
-means_init     = raw_splats.means.to(DEVICE).detach().float()       # (N, 3)
-sh0_init       = raw_splats.sh0.to(DEVICE).detach().float()         # (N, 3)
-scales_init    = raw_splats.scales.to(DEVICE).detach().float()      # (N, 3) log
-quats_init     = raw_splats.quats.to(DEVICE).detach().float()       # (N, 4) [w,x,y,z]
-# Canonicalize: move the smallest-axis log-scale to position 2 and rotate the
-# quat to match, so dropping the last scale axis gives the true 2DGS disk.
-# scales_init is rebuilt with the same permutation so the 3DGS reference
-# render below stays consistent (covariance is invariant under it).
-min_log_scale  = scales_init.min(dim=-1, keepdim=True).values
-scales2d_init, quats_init = to_2dgs_canonical(scales_init, quats_init)
-scales_init    = torch.cat([scales2d_init, min_log_scale], dim=-1)
-opacities_init = raw_splats.opacities.to(DEVICE).detach().float()   # (N,)
+def subsample_gaussians(g: dict, max_points: int) -> dict:
+    means = g["means"]
+    if means.shape[0] <= max_points:
+        return g
+    perm = torch.randperm(means.shape[0], device=means.device)[:max_points]
+    out = {k: g[k][perm] for k in ("means", "sh0", "scales2d", "quats", "opacities")}
+    if "scales3d" in g:
+        out["scales3d"] = g["scales3d"][perm]
+    return out
 
 
-view_data = [get_camera_params(f, DEVICE, ret_normals=True) for f in training_frames]
+# ── data module ───────────────────────────────────────────────────────────────
+dm = UCO3DDataModule(
+    num_workers=4,
+    image_height=512,
+    image_width=512,
+    load_masks=True,
+    load_depths=True,
+    single_sequence=False,
+)
+
+# ── step 1: preload Gaussians ONCE ────────────────────────────────────────────
+print("Preloading Gaussians into GPU cache...")
+splat_loader = dm.splat_only_loader(max_splats=MAX_SPLATS)
+splat_loader.batch_sampler._batches = [
+    b[:1] for b in splat_loader.batch_sampler._batches
+]
+
+gaussian_cache = {}
+
+for batch in splat_loader:
+    seq_name = batch["sequence_name"][0] if isinstance(batch["sequence_name"], list) else batch["sequence_name"]
+    raw = batch["sequence_gaussian_splats"][0]
+
+    means     = raw.means.float()
+    sh0       = raw.sh0.float()
+    scales    = raw.scales.float()
+    quats     = raw.quats.float()
+    opacities = raw.opacities.float()
+
+    min_log_scale      = scales.min(dim=-1, keepdim=True).values
+    scales2d, quats    = to_2dgs_canonical(scales, quats)
+    scales3d_canonical = torch.cat([scales2d, min_log_scale], dim=-1)
+
+    gaussian_cache[seq_name] = {
+        "means":     means,
+        "sh0":       sh0,
+        "scales3d":  scales3d_canonical,
+        "scales2d":  scales2d,
+        "quats":     quats,
+        "opacities": opacities,
+    }
+    print(f"  Cached Gaussians for '{seq_name}'  ({raw.means.shape[0]} points)")
+    if len(gaussian_cache) >= NUM_SEQUENCES:
+        break
+
+print(f"Gaussian cache ready: {len(gaussian_cache)} sequences.\n")
+
+# ── step 2: image-only loader ─────────────────────────────────────────────────
+image_loader = dm.image_only_loader()
+_img_seq_names = list(image_loader.dataset.sequence_names())
+image_loader.batch_sampler._batches = [
+    b[:: max(1, len(b) // NUM_VIEWS)][:NUM_VIEWS]
+    for seq, b in zip(_img_seq_names, image_loader.batch_sampler._batches)
+    if seq in gaussian_cache
+]
+print(f"Image loader ready: {len(image_loader)} sequences, up to {NUM_VIEWS} frames each.\n")
 
 # ── model + optimiser ─────────────────────────────────────────────────────────
 network   = SplatRefiner(output_format="2dgs").to(DEVICE)
 optimizer = AdamW(network.parameters(), lr=LR)
 
-# ── reference render: clean 3DGS rasterization (no network, no grad) ──────────
-v0_mats, v0_K, v0_gt_image, v0_fg_mask, v0_h, v0_w, v0_R_c2w, v0_gt_normals = view_data[0]
+os.makedirs(LOG_DIR, exist_ok=True)
 
-with torch.no_grad():
-    # Clean 3DGS RGB reference
-    ref_render = render(
-        means_init, quats_init, scales_init,
-        opacities_init, sh0_init,
-        v0_mats, v0_K, v0_h, v0_w, DEVICE
-    )
-
-# GT normals come from depth maps (one per view, already on device)
-gt_normals_vis = (v0_gt_normals * 0.5 + 0.5).clamp(0, 1)  # [-1,1] → [0,1] for vis
-
-os.makedirs("logs_2dgs_pointnet_normal_ghead", exist_ok=True)
+wandb.init(
+    entity="nikolasrieger",
+    project="adcv",
+    name=f"ghead-normal-{NUM_SEQUENCES}seq",
+    config={
+        "epochs": EPOCHS,
+        "lr": LR,
+        "num_sequences": NUM_SEQUENCES,
+        "num_views": NUM_VIEWS,
+        "lambda_normal": LAMBDA_NORMAL,
+        "max_points": MAX_POINTS,
+        "max_splats": MAX_SPLATS,
+    },
+)
 
 # ── training loop ─────────────────────────────────────────────────────────────
 for epoch in range(EPOCHS):
     network.train()
-    total_loss_rgb    = 0.0
-    total_loss_normal = 0.0
+    total_rgb    = 0.0
+    total_normal = 0.0
+    n_steps      = 0
 
-    for v_mats, v_K, v_gt_image, v_fg_mask, v_h, v_w, v_R_c2w, v_gt_normals in view_data:
-        optimizer.zero_grad()
+    for batch in image_loader:
+        seq_name = batch["sequence_name"][0] if isinstance(batch["sequence_name"], list) else batch["sequence_name"]
+        g_cpu = gaussian_cache[seq_name]
 
-        recon = network.reconstruct_splats_2dgs(
-            means_init, sh0_init, scales2d_init, quats_init, opacities_init,
-        )
+        T = batch["image_rgb"].shape[0]
+        step = max(1, T // NUM_VIEWS)
+        frame_indices = list(range(0, T, step))[:NUM_VIEWS]
 
-        rgb, normals = render_2dgs(
-            recon["means"], recon["quats"], recon["scales2d"],
-            recon["opacities"], recon["sh0"],
-            v_mats, v_K, v_h, v_w, DEVICE, ret_normals=True
-        )
+        view_data = [
+            get_camera_params(slice_frame(batch, i), DEVICE, ret_normals=True)
+            for i in frame_indices
+        ]
 
-        loss_rgb    = reconstruction_loss(rgb, v_gt_image, mask=v_fg_mask)
-        depth_valid = (v_gt_normals.norm(dim=1, keepdim=True) > 0.5).float()
-        normal_mask = (v_fg_mask > 0.5).float() * depth_valid
-        loss_normal = F.l1_loss(normals * normal_mask, v_gt_normals * normal_mask)
-        loss        = loss_rgb + LAMBDA_NORMAL * loss_normal
+        for v_mats, v_K, v_gt_image, v_fg_mask, v_h, v_w, _, v_gt_normals in view_data:
+            optimizer.zero_grad()
 
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(network.parameters(), max_norm=1.0)
-        optimizer.step()
+            g = {k: v.to(DEVICE) for k, v in g_cpu.items()}
+            g_sub = subsample_gaussians(g, MAX_POINTS)
 
-        total_loss_rgb    += loss_rgb.item()
-        total_loss_normal += loss_normal.item()
+            recon = network.reconstruct_splats_2dgs(
+                g_sub["means"], g_sub["sh0"],
+                g_sub["scales2d"], g_sub["quats"], g_sub["opacities"],
+            )
+            rgb, normals = render_2dgs(
+                recon["means"], recon["quats"], recon["scales2d"],
+                recon["opacities"], recon["sh0"],
+                v_mats, v_K, v_h, v_w, DEVICE, ret_normals=True,
+            )
+
+            loss_rgb    = reconstruction_loss(rgb, v_gt_image, mask=v_fg_mask)
+            depth_valid = (v_gt_normals.norm(dim=1, keepdim=True) > 0.5).float()
+            normal_mask = (v_fg_mask > 0.5).float() * depth_valid
+            loss_normal = F.l1_loss(normals * normal_mask, v_gt_normals * normal_mask)
+            loss        = loss_rgb + LAMBDA_NORMAL * loss_normal
+
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(network.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            total_rgb    += loss_rgb.item()
+            total_normal += loss_normal.item()
+            n_steps      += 1
+
+            del g, g_sub, recon, rgb, normals
+            torch.cuda.empty_cache()
 
     # ── logging ───────────────────────────────────────────────────────────────
     if epoch % LOG_EVERY == 0:
-        avg_rgb    = total_loss_rgb    / NUM_VIEWS
-        avg_normal = total_loss_normal / NUM_VIEWS
+        avg_rgb    = total_rgb    / max(n_steps, 1)
+        avg_normal = total_normal / max(n_steps, 1)
 
         network.eval()
-        with torch.no_grad():
-            recon_eval = network.reconstruct_splats_2dgs(
-                means_init, sh0_init, scales2d_init, quats_init, opacities_init,
-            )
-            eval_rgb, eval_normals = render_2dgs(
-                recon_eval["means"], recon_eval["quats"], recon_eval["scales2d"],
-                recon_eval["opacities"], recon_eval["sh0"],
-                v0_mats, v0_K, v0_h, v0_w, DEVICE, ret_normals=True
-            )
-            eval_normals_vis = (eval_normals * 0.5 + 0.5).clamp(0, 1)
+        for si, (seq_name, g_cpu) in enumerate(gaussian_cache.items()):
+            with torch.no_grad():
+                g = {k: v.to(DEVICE) for k, v in g_cpu.items()}
+                g_sub = subsample_gaussians(g, MAX_POINTS)
 
-        save_path = f"logs_2dgs_pointnet_normal_ghead/epoch_{epoch:05d}.png"
-        SplatRenderVisualizer.save(
-            save_path,
-            render_colors = torch.cat([
-                v0_gt_image.permute(0, 2, 3, 1),        # GT RGB
-                ref_render.permute(0, 2, 3, 1),          # 3DGS reference RGB
-                eval_rgb.permute(0, 2, 3, 1),            # 2DGS predicted RGB
-                gt_normals_vis.permute(0, 2, 3, 1),      # GT normals (from input splat)
-                eval_normals_vis.permute(0, 2, 3, 1),    # predicted normals
-            ], dim=2),
-            render_alphas = torch.ones(1, v0_h, v0_w * 5, 1, device=DEVICE),
-        )
+                for batch in image_loader:
+                    bn = batch["sequence_name"][0] if isinstance(batch["sequence_name"], list) else batch["sequence_name"]
+                    if bn != seq_name:
+                        continue
+
+                    v0_mats, v0_K, v0_gt_image, v0_fg_mask, v0_h, v0_w, _, v0_gt_normals = \
+                        get_camera_params(slice_frame(batch, 0), DEVICE, ret_normals=True)
+
+                    recon_eval = network.reconstruct_splats_2dgs(
+                        g_sub["means"], g_sub["sh0"],
+                        g_sub["scales2d"], g_sub["quats"], g_sub["opacities"],
+                    )
+                    eval_rgb, eval_normals = render_2dgs(
+                        recon_eval["means"], recon_eval["quats"], recon_eval["scales2d"],
+                        recon_eval["opacities"], recon_eval["sh0"],
+                        v0_mats, v0_K, v0_h, v0_w, DEVICE, ret_normals=True,
+                    )
+                    ref_rgb = render(
+                        g_sub["means"], g_sub["quats"], g_sub["scales3d"],
+                        g_sub["opacities"], g_sub["sh0"],
+                        v0_mats, v0_K, v0_h, v0_w, DEVICE,
+                    )
+                    break
+
+            eval_normals_vis = (eval_normals * 0.5 + 0.5).clamp(0, 1)
+            gt_normals_vis   = (v0_gt_normals * 0.5 + 0.5).clamp(0, 1)
+            save_path = f"{LOG_DIR}/epoch_{epoch:05d}_seq{si:02d}.png"
+            SplatRenderVisualizer.save(
+                save_path,
+                render_colors=torch.cat([
+                    v0_gt_image.permute(0, 2, 3, 1),
+                    ref_rgb.permute(0, 2, 3, 1),
+                    eval_rgb.permute(0, 2, 3, 1),
+                    gt_normals_vis.permute(0, 2, 3, 1),
+                    eval_normals_vis.permute(0, 2, 3, 1),
+                ], dim=2),
+                render_alphas=torch.ones(1, v0_h, v0_w * 5, 1, device=DEVICE),
+            )
+            wandb.log({f"images/seq{si:02d}": wandb.Image(save_path, caption="gt_rgb | ref_rgb | pred_rgb | gt_normals | pred_normals")}, step=epoch)
+
+        wandb.log({
+            "loss/rgb": avg_rgb,
+            "loss/normal": avg_normal,
+            "loss/total": avg_rgb + LAMBDA_NORMAL * avg_normal,
+        }, step=epoch)
         print(
             f"Epoch {epoch:05d}/{EPOCHS} | "
             f"RGB={avg_rgb:.6f} | Normal={avg_normal:.6f} | "
-            f"Saved {save_path}"
+            f"Saved {len(gaussian_cache)} images to {LOG_DIR}/"
         )

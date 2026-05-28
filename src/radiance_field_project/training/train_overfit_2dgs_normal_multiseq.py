@@ -6,19 +6,21 @@ from uco3d.dataset_utils.data_types import Cameras
 from radiance_field_project.utils.splat_visualizer import SplatRenderVisualizer
 from radiance_field_project.utils.losses import reconstruction_loss
 from radiance_field_project.utils.rendering import render_2dgs, render, get_camera_params
+from radiance_field_project.utils.gaussian_ops import to_2dgs_canonical
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
+import wandb
 
 os.environ["UCO3D_DATASET_ROOT"] = "/mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw"
 
 # ── hyperparams ───────────────────────────────────────────────────────────────
-EPOCHS        = 10_000
+EPOCHS        = 600
 LR            = 1e-4
-NUM_SEQUENCES = 1     # ← increase to train on more sequences
+NUM_SEQUENCES = 5     # ← increase to train on more sequences
 NUM_VIEWS     = 10     # views sampled per sequence (evenly spaced)
 LOG_EVERY     = 20
-LAMBDA_NORMAL = 0.8
+LAMBDA_NORMAL = 0.4
 MAX_POINTS    = 150_000 
 MAX_SPLATS    = 260_000  # skip sequences with more splats than this
 DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -139,6 +141,21 @@ optimizer = AdamW(network.parameters(), lr=LR)
 
 os.makedirs(LOG_DIR, exist_ok=True)
 
+wandb.init(
+    entity="nikolasrieger",
+    project="adcv",
+    name=f"multiseq-normal-{NUM_SEQUENCES}seq",
+    config={
+        "epochs": EPOCHS,
+        "lr": LR,
+        "num_sequences": NUM_SEQUENCES,
+        "num_views": NUM_VIEWS,
+        "lambda_normal": LAMBDA_NORMAL,
+        "max_points": MAX_POINTS,
+        "max_splats": MAX_SPLATS,
+    },
+)
+
 # ── training loop ─────────────────────────────────────────────────────────────
 for epoch in range(EPOCHS):
     network.train()
@@ -249,7 +266,9 @@ for epoch in range(EPOCHS):
                 ], dim=2),
                 render_alphas=torch.ones(1, v0_h, v0_w * 6, 1, device=DEVICE),
             )
+            wandb.log({f"images/seq{si:02d}": wandb.Image(save_path, caption="gt_rgb | ref_rgb | pred_rgb | gt_normals | ref_normals | pred_normals")}, step=epoch)
 
+        wandb.log({"loss/rgb": avg_rgb, "loss/normal": avg_normal, "loss/total": avg_rgb + LAMBDA_NORMAL * avg_normal}, step=epoch)
         print(
             f"Epoch {epoch:05d}/{EPOCHS} | "
             f"RGB={avg_rgb:.6f} | Normal={avg_normal:.6f} | "
