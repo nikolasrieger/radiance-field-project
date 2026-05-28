@@ -1,0 +1,6 @@
+## Todo
+- [ ] test cosine similarity for normals
+- [ ] check if normals are consistent in view or world space, check for sign flip
+- [ ] try depth supervision instead of normal supervision
+- [ ] feed features into encoder as well
+- [ ] test more local tokens for merging instead of global tokens
