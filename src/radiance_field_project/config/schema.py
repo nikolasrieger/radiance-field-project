@@ -30,6 +30,16 @@ class LossType(Enum):
     l1_masked = "l1_masked"
 
 
+class NormalLossType(Enum):
+    l1 = "l1"
+    cosine = "cosine"
+
+
+class NormalRegion(Enum):
+    foreground = "foreground"  # depth-valid pixels inside the fg mask
+    full = "full"              # all depth-valid pixels
+
+
 class ModelType(Enum):
     pointnet2 = "pointnet2"
     minipointnet = "minipointnet"
@@ -88,10 +98,17 @@ class ModelConfig:
 class LossConfig:
     type: LossType = LossType.l2_masked
     lambda_ssim: float = 0.2
-    # Weight on the rendered-vs-depth-derived normal L1 loss. Set to 0 to
-    # disable normal supervision. Requires output_type=gs2d (only the 2dgs
-    # rasterizer produces surface normals).
+    # Weight on the normal supervision loss. Set to 0 to disable. Requires
+    # output_type=gs2d (only the 2dgs rasterizer produces surface normals).
     lambda_normal: float = 0.0
+    # Which loss to use for normal supervision: "l1" or "cosine" (1 - cos sim).
+    normal_loss_type: NormalLossType = NormalLossType.l1
+    # Region over which the normal loss is computed: "foreground" (fg mask ∩
+    # depth valid) or "full" (all depth-valid pixels).
+    normal_region: NormalRegion = NormalRegion.foreground
+    # Region over which the photometric loss is computed: "foreground" (fg
+    # mask only) or "full" (whole image).
+    recon_region: NormalRegion = NormalRegion.foreground
 
 
 @dataclass

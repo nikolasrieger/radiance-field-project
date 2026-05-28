@@ -108,7 +108,7 @@ def world_normals_to_camera(normals: torch.Tensor, viewmats: torch.Tensor) -> to
 
     The 2dgs rasterizer emits ``render_normals`` in world coordinates; the
     depth-derived GT normals from :func:`depth_to_normals` live in the
-    camera coordinate frame. To compare them with an L1 loss they must
+    camera coordinate frame. To compare them with a normal loss they must
     share a frame, so we apply the world->camera rotation block of each
     ``viewmats`` row to its corresponding normal map.
 

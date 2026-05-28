@@ -1,5 +1,5 @@
 run:
-  name: minipointnet_3dgs
+  name: minipointnet_2dgs_cos_full
   wandb_mode: online
 
 data:
@@ -7,7 +7,7 @@ data:
   subset_lists_filename: /home/nrieger/radiance-field-project/set_lists_all-categories.sqlite
   num_supervision_views: 10
   num_workers: 4
-  num_sequences: 5       # how many sequences to load into the Gaussian cache
+  num_sequences: 1       # how many sequences to load into the Gaussian cache
   max_splats: 260000     # skip sequences with more splats than this
   max_points: 150000     # subsample Gaussians to at most this many per forward pass
   # Restrict to specific sequences for overfitting, or leave empty for full dataset.
@@ -18,14 +18,17 @@ model:
   output_type: gs2d
 
 train:
-  epochs: 1000
+  epochs: 300
   lr: 1e-4
   optimizer: adamw
   weight_decay: 0.0
   grad_clip: 1.0
-  log_every: 10
+  log_every: 50
   ckpt_every: 100
   loss:
     type: l2_masked
+    normal_loss_type: cosine  # cosine or l1
+    normal_region: full       # full or foreground
+    recon_region: full        # full or foreground
     lambda_ssim: 0.2
     lambda_normal: 0.4

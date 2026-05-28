@@ -24,7 +24,7 @@ from uco3d import GaussianSplats
 from uco3d.dataset_utils.data_types import Cameras
 
 from radiance_field_project.config import parse_cli
-from radiance_field_project.config.schema import LossType, Optimizer, OutputType, WandbMode
+from radiance_field_project.config.schema import LossType, NormalLossType, NormalRegion, Optimizer, OutputType, WandbMode
 from radiance_field_project.data.datamodule import UCO3DDataModule
 from radiance_field_project.models.model_factory import build_model
 from radiance_field_project.utils.gaussian_ops import to_2dgs_canonical
@@ -119,11 +119,14 @@ def _build_optimizer(params, cfg):
 
 
 def _photometric_loss(rendered, gt_image, fg_mask, loss_cfg):
+    mask = fg_mask if loss_cfg.recon_region == NormalRegion.foreground else None
     if loss_cfg.type == LossType.l2_masked:
-        return reconstruction_loss(rendered, gt_image, mask=fg_mask,
+        return reconstruction_loss(rendered, gt_image, mask=mask,
                                    lambda_ssim=loss_cfg.lambda_ssim)
-    binary = (fg_mask > 0.5).float()
-    return ((rendered - gt_image).abs() * binary).sum() / binary.sum().clamp(min=1.0)
+    if mask is not None:
+        binary = (mask > 0.5).float()
+        return ((rendered - gt_image).abs() * binary).sum() / binary.sum().clamp(min=1.0)
+    return (rendered - gt_image).abs().mean()
 
 
 def _init_wandb(cfg, output_dir: Path):
@@ -257,9 +260,16 @@ def main():
                         photo_loss  = _photometric_loss(rendered, v_gt, v_mask, cfg.train.loss)
                         normals_cam = world_normals_to_camera(rendered_normals, v_mats)
                         depth_valid = (v_gt_normals.norm(dim=1, keepdim=True) > 0.5).float()
-                        normal_mask = (v_mask > 0.5).float() * depth_valid
-                        normal_loss = F.l1_loss(normals_cam * normal_mask,
-                                                v_gt_normals * normal_mask)
+                        if cfg.train.loss.normal_region == NormalRegion.full:
+                            normal_mask = depth_valid
+                        else:
+                            normal_mask = (v_mask > 0.5).float() * depth_valid
+                        if cfg.train.loss.normal_loss_type == NormalLossType.cosine:
+                            dot = (normals_cam * v_gt_normals).sum(dim=1, keepdim=True).clamp(-1.0, 1.0)
+                            normal_loss = ((1.0 - dot) * normal_mask).mean()
+                        else:
+                            normal_loss = F.l1_loss(normals_cam * normal_mask,
+                                                    v_gt_normals * normal_mask)
                         loss        = photo_loss + cfg.train.loss.lambda_normal * normal_loss
                         total_normal += normal_loss.item()
                     else:
