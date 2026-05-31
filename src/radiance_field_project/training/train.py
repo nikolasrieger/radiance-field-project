@@ -118,6 +118,15 @@ def _build_optimizer(params, cfg):
     raise ValueError(f"Unknown optimizer: {cfg.optimizer}")
 
 
+def _depth_loss(rendered_depth: torch.Tensor, gt_depth: torch.Tensor,
+                depth_mask: torch.Tensor) -> torch.Tensor:
+    """Scale-normalised L1 depth loss masked to valid GT depth pixels."""
+    n_valid   = depth_mask.sum().clamp(min=1.0)
+    mean_depth = (gt_depth * depth_mask).sum() / n_valid
+    abs_err   = (rendered_depth.nan_to_num(0.0) - gt_depth).abs() * depth_mask
+    return abs_err.sum() / (n_valid * mean_depth.clamp(min=1e-6))
+
+
 def _photometric_loss(rendered, gt_image, fg_mask, loss_cfg):
     mask = fg_mask if loss_cfg.recon_region == NormalRegion.foreground else None
     if loss_cfg.type == LossType.l2_masked:
@@ -168,12 +177,13 @@ def main():
     output_type = cfg.model.output_type.value   # "3dgs" | "2dgs"
     is_2dgs     = output_type == "2dgs"
     use_normals = cfg.train.loss.lambda_normal > 0
+    use_depth   = cfg.train.loss.lambda_depth  > 0
     if use_normals and not is_2dgs:
         raise ValueError(
             "loss.lambda_normal > 0 requires model.output_type=gs2d "
             "(only the 2dgs rasterizer produces surface normals)"
         )
-    print(f"Output type: {output_type}  |  normal supervision: {use_normals}")
+    print(f"Output type: {output_type}  |  normal supervision: {use_normals}  |  depth supervision: {use_depth}")
 
     # ── data module ───────────────────────────────────────────────────────────
     dm = UCO3DDataModule(
@@ -183,7 +193,7 @@ def main():
         image_height=cfg.data.image_height,
         image_width=cfg.data.image_width,
         load_masks=True,
-        load_depths=use_normals,
+        load_depths=use_normals or use_depth,
         load_gaussian_splats=True,
         pick_sequences=list(cfg.data.pick_sequences),
     )
@@ -230,7 +240,7 @@ def main():
     try:
         for epoch in range(cfg.train.epochs):
             model.train()
-            total_loss = total_photo = total_normal = 0.0
+            total_loss = total_photo = total_normal = total_depth = 0.0
             n_steps = 0
 
             for batch in image_loader:
@@ -246,6 +256,15 @@ def main():
                     else:
                         v_mats, v_K, v_gt, v_mask, v_h, v_w = \
                             get_camera_params(frame, device)
+
+                    if use_depth:
+                        depth_adj = frame["depth_scale_adjustment"]
+                        if hasattr(depth_adj, "to"):
+                            depth_adj = depth_adj.to(device).view(-1, 1, 1, 1).float()
+                        else:
+                            depth_adj = float(depth_adj)
+                        v_depth      = frame["depth_map"].to(device) * depth_adj
+                        v_depth_mask = (frame["depth_mask"].to(device) > 0.5).float()
 
                     optimizer.zero_grad(set_to_none=True)
 
@@ -272,11 +291,29 @@ def main():
                                                     v_gt_normals * normal_mask)
                         loss        = photo_loss + cfg.train.loss.lambda_normal * normal_loss
                         total_normal += normal_loss.item()
+                        if use_depth:
+                            _, rendered_depth = render_view(
+                                recon, v_mats, v_K, v_w, v_h,
+                                output_type=output_type, device=device, ret_depth=True,
+                            )
+                            depth_loss  = _depth_loss(rendered_depth, v_depth, v_depth_mask)
+                            loss        = loss + cfg.train.loss.lambda_depth * depth_loss
+                            total_depth += depth_loss.item()
                     else:
-                        rendered   = render_view(recon, v_mats, v_K, v_w, v_h,
-                                                 output_type=output_type, device=device)
+                        if use_depth:
+                            rendered, rendered_depth = render_view(
+                                recon, v_mats, v_K, v_w, v_h,
+                                output_type=output_type, device=device, ret_depth=True,
+                            )
+                        else:
+                            rendered = render_view(recon, v_mats, v_K, v_w, v_h,
+                                                   output_type=output_type, device=device)
                         photo_loss = _photometric_loss(rendered, v_gt, v_mask, cfg.train.loss)
                         loss       = photo_loss
+                        if use_depth:
+                            depth_loss  = _depth_loss(rendered_depth, v_depth, v_depth_mask)
+                            loss        = loss + cfg.train.loss.lambda_depth * depth_loss
+                            total_depth += depth_loss.item()
 
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(),
@@ -291,15 +328,20 @@ def main():
             avg        = total_loss   / n_steps
             avg_photo  = total_photo  / n_steps
             avg_normal = total_normal / n_steps
+            avg_depth  = total_depth  / n_steps
 
             wandb_log: dict = {"train/loss": avg, "train/photo_loss": avg_photo}
             if use_normals:
                 wandb_log["train/normal_loss"] = avg_normal
+            if use_depth:
+                wandb_log["train/depth_loss"] = avg_depth
 
             if epoch % cfg.train.log_every == 0:
                 parts = [f"Epoch {epoch:05d}/{cfg.train.epochs}", f"Loss={avg:.6f}"]
                 if use_normals:
                     parts += [f"Photo={avg_photo:.6f}", f"Normal={avg_normal:.6f}"]
+                if use_depth:
+                    parts.append(f"Depth={avg_depth:.6f}")
                 print(" | ".join(parts))
 
                 model.eval()
@@ -318,12 +360,26 @@ def main():
                             v0_mats, v0_K, v0_gt, _, v0_h, v0_w = \
                                 get_camera_params(frame0, device)
 
-                        splats_vis = _subsample(_to_device(splats_cpu, device), max_points)
-                        ref_render = render_view(splats_vis, v0_mats, v0_K, v0_w, v0_h,
-                                                 output_type="3dgs", device=device)
-                        eval_recon = model.reconstruct_splats(splats_vis)
+                        if use_depth:
+                            depth_adj = frame0["depth_scale_adjustment"]
+                            if hasattr(depth_adj, "to"):
+                                depth_adj = depth_adj.to(device).view(-1, 1, 1, 1).float()
+                            else:
+                                depth_adj = float(depth_adj)
+                            v0_depth = frame0["depth_map"].to(device) * depth_adj
 
+                        splats_vis = _subsample(_to_device(splats_cpu, device), max_points)
+                        eval_recon = model.reconstruct_splats(splats_vis)
                         image_path = output_dir / f"epoch_{epoch:05d}_seq{si:02d}.png"
+
+                        if use_depth:
+                            ref_render, ref_depth = render_view(
+                                splats_vis, v0_mats, v0_K, v0_w, v0_h,
+                                output_type="3dgs", device=device, ret_depth=True,
+                            )
+                        else:
+                            ref_render = render_view(splats_vis, v0_mats, v0_K, v0_w, v0_h,
+                                                     output_type="3dgs", device=device)
 
                         if use_normals:
                             eval_rgb, eval_normals = render_view(
@@ -336,33 +392,51 @@ def main():
                                 output_type="2dgs", device=device, ret_normals=True,
                             )
                             ref_normals = world_normals_to_camera(ref_normals, v0_mats)
-
-                            def _nrm(n): return (n * 0.5 + 0.5).clamp(0, 1)
-                            top = torch.cat([v0_gt.permute(0,2,3,1),
-                                             ref_render.permute(0,2,3,1),
-                                             eval_rgb.permute(0,2,3,1)], dim=2)
-                            bot = torch.cat([_nrm(v0_gt_normals).permute(0,2,3,1),
-                                             _nrm(ref_normals).permute(0,2,3,1),
-                                             _nrm(eval_normals).permute(0,2,3,1)], dim=2)
-                            SplatRenderVisualizer.save(
-                                str(image_path),
-                                render_colors=torch.cat([top, bot], dim=1),
-                                render_alphas=torch.ones(1, v0_h*2, v0_w*3, 1, device=device),
-                                labels=["GT", "Reference (3DGS)", f"Recon @ {epoch}",
-                                        "GT normals", "Reference normals", f"Recon normals @ {epoch}"],
-                                columns=3,
+                            if use_depth:
+                                _, eval_depth = render_view(
+                                    eval_recon, v0_mats, v0_K, v0_w, v0_h,
+                                    output_type=output_type, device=device, ret_depth=True,
+                                )
+                        elif use_depth:
+                            eval_rgb, eval_depth = render_view(
+                                eval_recon, v0_mats, v0_K, v0_w, v0_h,
+                                output_type=output_type, device=device, ret_depth=True,
                             )
                         else:
                             eval_rgb = render_view(eval_recon, v0_mats, v0_K, v0_w, v0_h,
                                                    output_type=output_type, device=device)
-                            SplatRenderVisualizer.save(
-                                str(image_path),
-                                render_colors=torch.cat([v0_gt.permute(0,2,3,1),
-                                                         ref_render.permute(0,2,3,1),
-                                                         eval_rgb.permute(0,2,3,1)], dim=2),
-                                render_alphas=torch.ones(1, v0_h, v0_w*3, 1, device=device),
-                                labels=["GT", "Reference (3DGS)", f"Recon @ epoch {epoch}"],
-                            )
+
+                        def _nrm(n): return (n * 0.5 + 0.5).clamp(0, 1)
+                        def _dep(d):
+                            d = d.squeeze(1)
+                            valid = d > 0
+                            lo = d[valid].min() if valid.any() else d.min()
+                            return ((d - lo) / (d.max() - lo + 1e-8)).clamp(0, 1).unsqueeze(-1).expand(-1, -1, -1, 3)
+
+                        rows = [torch.cat([v0_gt.permute(0,2,3,1),
+                                           ref_render.permute(0,2,3,1),
+                                           eval_rgb.permute(0,2,3,1)], dim=2)]
+                        labels = ["GT", "Reference (3DGS)", f"Recon @ {epoch}"]
+
+                        if use_normals:
+                            rows.append(torch.cat([_nrm(v0_gt_normals).permute(0,2,3,1),
+                                                   _nrm(ref_normals).permute(0,2,3,1),
+                                                   _nrm(eval_normals).permute(0,2,3,1)], dim=2))
+                            labels += ["GT normals", "Reference normals", f"Recon normals @ {epoch}"]
+
+                        if use_depth:
+                            rows.append(torch.cat([_dep(v0_depth),
+                                                   _dep(ref_depth),
+                                                   _dep(eval_depth)], dim=2))
+                            labels += ["GT depth", "Reference depth", f"Recon depth @ {epoch}"]
+
+                        SplatRenderVisualizer.save(
+                            str(image_path),
+                            render_colors=torch.cat(rows, dim=1),
+                            render_alphas=torch.ones(1, v0_h * len(rows), v0_w * 3, 1, device=device),
+                            labels=labels,
+                            columns=3,
+                        )
 
                         if wandb_run is not None:
                             wandb_log[f"recon/seq{si:02d}"] = wandb.Image(str(image_path))

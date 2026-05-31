@@ -42,13 +42,15 @@ def render_view(
     output_type: str = "3dgs",
     device=None,
     ret_normals: bool = False,
+    ret_depth: bool = False,
 ):
     """Rasterize a ``GaussianSplats`` to RGB, branching on ``output_type``.
 
     For ``2dgs`` the third column of ``splats.scales`` is ignored; the caller is
     free to pad it with a sentinel value. Returns ``(C, 3, H, W)`` RGB by
     default. If ``ret_normals=True`` (2dgs only) returns ``(rgb, normals)``
-    where ``normals`` is ``(C, 3, H, W)``.
+    where ``normals`` is ``(C, 3, H, W)``. If ``ret_depth=True`` returns
+    ``(rgb, depth)`` where ``depth`` is ``(C, 1, H, W)`` expected z-depth (opacity-normalised).
     """
     if ret_normals and output_type != "2dgs":
         raise ValueError("ret_normals=True is only supported for output_type='2dgs'")
@@ -84,19 +86,28 @@ def render_view(
         packed=False,
         absgrad=False,
     )
+    render_mode = "RGB+ED" if ret_depth else "RGB"
+
     if output_type == "3dgs":
         imgs, _, _ = rasterization(
             **common, sparse_grad=False, rasterize_mode="classic", distributed=False,
+            render_mode=render_mode,
         )
+        if ret_depth:
+            return imgs[..., :3].permute(0, 3, 1, 2), imgs[..., 3:4].permute(0, 3, 1, 2)
         return imgs.permute(0, 3, 1, 2)
 
-    out = rasterization_2dgs(**common)
-    rgb = out[0].permute(0, 3, 1, 2)
+    out = rasterization_2dgs(**common, render_mode=render_mode)
+    rgb = out[0][..., :3].permute(0, 3, 1, 2)
+    if ret_depth and not ret_normals:
+        return rgb, out[0][..., 3:4].permute(0, 3, 1, 2)
     if not ret_normals:
         return rgb
     # The 2dgs rasterizer returns several auxiliary tensors after RGB; the
     # surface-normal map is the first 3-channel one of them.
     for tensor in out[1:]:
+        if not isinstance(tensor, torch.Tensor):
+            continue
         t = tensor.permute(0, 3, 1, 2) if tensor.dim() == 4 else tensor
         if t.dim() == 4 and t.shape[1] == 3:
             return rgb, t

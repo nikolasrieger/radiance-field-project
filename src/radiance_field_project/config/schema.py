@@ -101,6 +101,9 @@ class LossConfig:
     # Weight on the normal supervision loss. Set to 0 to disable. Requires
     # output_type=gs2d (only the 2dgs rasterizer produces surface normals).
     lambda_normal: float = 0.0
+    # Weight on the depth supervision loss (L1 against GT depth map). Set to 0
+    # to disable. Works with both output types.
+    lambda_depth: float = 0.0
     # Which loss to use for normal supervision: "l1" or "cosine" (1 - cos sim).
     normal_loss_type: NormalLossType = NormalLossType.l1
     # Region over which the normal loss is computed: "foreground" (fg mask ∩
