@@ -6,3 +6,4 @@
 - [ ] pointnet++ training stability check - maybe Leo 
 - [ ] 3D drag evaluation - Nikolas
 - [ ] improve training efficiency - Nikolas
+- [ ] visualize trainable samples from the current dataset - Leo
