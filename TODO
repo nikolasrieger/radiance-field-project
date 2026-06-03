@@ -1,8 +1,8 @@
 ## Todo
-- [x] test cosine similarity for normals 
-- [x] check if normals are consistent in view or world space, check for sign flip -> consistent everything in the camera frame
-- [x] try depth supervision instead of normal supervision
-- [x] benchmark depth loss
-- [x] add evaluation script
-- [ ] feed features into encoder as well
+- [ ] do some ablation runs - maybe Nikolas
+- [ ] feed features into encoder as well - Leo
 - [ ] test more local tokens for merging instead of global tokens
+- [ ] have another look at decoder (e.g. Can3Tok, DA3) - Leo
+- [ ] pointnet++ training stability check - maybe Leo 
+- [ ] 3D drag evaluation - Nikolas
+- [ ] improve training efficiency - Nikolas
