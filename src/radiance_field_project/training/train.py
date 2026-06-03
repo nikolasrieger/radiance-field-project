@@ -14,6 +14,7 @@ Training is two-phase:
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 import torch
 import torch.nn.functional as F
@@ -155,6 +156,11 @@ def _seq_name(batch) -> str:
     return n[0] if isinstance(n, (list, tuple)) else n
 
 
+def _sync(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -236,44 +242,107 @@ def main():
     optimizer = _build_optimizer(model.parameters(), cfg.train)
     print(f"Model: {model.__class__.__name__}  |  params: {sum(p.numel() for p in model.parameters()):,}")
 
+    # ── phase 3: precompute frame data cache (CPU) ───────────────────────────
+    print("Precomputing frame data cache...")
+    _cpu = torch.device("cpu")
+    frame_cache: dict[str, list[dict]] = {}
+    for _batch in image_loader:
+        _seq = _seq_name(_batch)
+        _frames = []
+        for _i in range(_batch["image_rgb"].shape[0]):
+            _fr = _slice_frame(_batch, _i)
+            if use_normals:
+                _vm, _K, _gt, _mask, _h, _w, _, _normals = \
+                    get_camera_params(_fr, _cpu, ret_normals=True)
+                _fd: dict = dict(v_mats=_vm, v_K=_K, v_gt=_gt, v_mask=_mask,
+                                 v_h=_h, v_w=_w, v_gt_normals=_normals)
+            else:
+                _vm, _K, _gt, _mask, _h, _w = get_camera_params(_fr, _cpu)
+                _fd = dict(v_mats=_vm, v_K=_K, v_gt=_gt, v_mask=_mask, v_h=_h, v_w=_w)
+            if use_depth:
+                _dsa = _fr["depth_scale_adjustment"]
+                _dsa = _dsa.view(-1)[0].item() if torch.is_tensor(_dsa) else float(_dsa)
+                _fd["v_depth"]      = _fr["depth_map"].float() * _dsa
+                _fd["v_depth_mask"] = (_fr["depth_mask"] > 0.5).float()
+            _frames.append(_fd)
+        frame_cache[_seq] = _frames
+    n_cached = sum(len(v) for v in frame_cache.values())
+    print(f"Frame cache: {n_cached} frames across {len(frame_cache)} sequences.\n")
+
+    # ── profiler setup ────────────────────────────────────────────────────────
+    _profile_steps = cfg.train.profile_steps
+    _profiler = None
+    if _profile_steps > 0:
+        _activities = [torch.profiler.ProfilerActivity.CPU]
+        if device.type == "cuda":
+            _activities.append(torch.profiler.ProfilerActivity.CUDA)
+        _profiler = torch.profiler.profile(
+            activities=_activities,
+            schedule=torch.profiler.schedule(wait=1, warmup=1, active=_profile_steps, repeat=1),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(str(output_dir / "profiler")),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=False,
+        )
+        _profiler.__enter__()
+        print(f"Profiling: recording {_profile_steps} steps after 1 wait + 1 warmup. "
+              f"Trace → {output_dir / 'profiler'}\n")
+
     # ── training loop ─────────────────────────────────────────────────────────
     try:
         for epoch in range(cfg.train.epochs):
             model.train()
             total_loss = total_photo = total_normal = total_depth = 0.0
+            total_t_forward = total_t_render = total_t_backward = 0.0
             n_steps = 0
+            t_epoch_start = time.perf_counter()
 
-            for batch in image_loader:
-                seq          = _seq_name(batch)
-                splats_cpu   = gaussian_cache[seq]
-                T            = batch["image_rgb"].shape[0]
+            for seq, cached_frames in frame_cache.items():
+                splats_cpu = gaussian_cache[seq]
+                T          = len(cached_frames)
 
-                for i in range(T):
-                    frame = _slice_frame(batch, i)
+                optimizer.zero_grad(set_to_none=True)
+
+                _sync(device)
+                _t0 = time.perf_counter()
+                splats = _subsample(_to_device(splats_cpu, device), max_points)
+                recon  = model.reconstruct_splats(splats)
+                _sync(device)
+                total_t_forward += time.perf_counter() - _t0
+
+                # Detach recon from the network graph so each frame's render
+                # backward only traverses the rasterizer, not the full network.
+                # We accumulate render→recon gradients and do one network
+                # backward at the end.
+                _recon_src = [recon.means, recon.sh0, recon.scales,
+                              recon.quats, recon.opacities]
+                _recon_d   = [t.detach().requires_grad_(True) for t in _recon_src]
+                recon_d = GaussianSplats(
+                    means=_recon_d[0], sh0=_recon_d[1], scales=_recon_d[2],
+                    quats=_recon_d[3], opacities=_recon_d[4],
+                    shN=None, fg_mask=None,
+                )
+                _recon_grads = [torch.zeros_like(t) for t in _recon_d]
+
+                seq_photo  = seq_normal = seq_depth = seq_loss_val = 0.0
+
+                _sync(device)
+                _t0 = time.perf_counter()
+                for fd in cached_frames:
+                    v_mats = fd["v_mats"].to(device, non_blocking=True)
+                    v_K    = fd["v_K"].to(device, non_blocking=True)
+                    v_gt   = fd["v_gt"].to(device, non_blocking=True)
+                    v_mask = fd["v_mask"].to(device, non_blocking=True)
+                    v_h, v_w = fd["v_h"], fd["v_w"]
                     if use_normals:
-                        v_mats, v_K, v_gt, v_mask, v_h, v_w, _, v_gt_normals = \
-                            get_camera_params(frame, device, ret_normals=True)
-                    else:
-                        v_mats, v_K, v_gt, v_mask, v_h, v_w = \
-                            get_camera_params(frame, device)
-
+                        v_gt_normals = fd["v_gt_normals"].to(device, non_blocking=True)
                     if use_depth:
-                        depth_adj = frame["depth_scale_adjustment"]
-                        if hasattr(depth_adj, "to"):
-                            depth_adj = depth_adj.to(device).view(-1, 1, 1, 1).float()
-                        else:
-                            depth_adj = float(depth_adj)
-                        v_depth      = frame["depth_map"].to(device) * depth_adj
-                        v_depth_mask = (frame["depth_mask"].to(device) > 0.5).float()
-
-                    optimizer.zero_grad(set_to_none=True)
-
-                    splats = _subsample(_to_device(splats_cpu, device), max_points)
-                    recon  = model.reconstruct_splats(splats)
+                        v_depth      = fd["v_depth"].to(device, non_blocking=True)
+                        v_depth_mask = fd["v_depth_mask"].to(device, non_blocking=True)
 
                     if use_normals:
                         rendered, rendered_normals = render_view(
-                            recon, v_mats, v_K, v_w, v_h,
+                            recon_d, v_mats, v_K, v_w, v_h,
                             output_type=output_type, device=device, ret_normals=True,
                         )
                         photo_loss  = _photometric_loss(rendered, v_gt, v_mask, cfg.train.loss)
@@ -289,48 +358,83 @@ def main():
                         else:
                             normal_loss = F.l1_loss(normals_cam * normal_mask,
                                                     v_gt_normals * normal_mask)
-                        loss        = photo_loss + cfg.train.loss.lambda_normal * normal_loss
-                        total_normal += normal_loss.item()
+                        frame_loss  = photo_loss + cfg.train.loss.lambda_normal * normal_loss
+                        seq_normal += normal_loss.item()
                         if use_depth:
                             _, rendered_depth = render_view(
-                                recon, v_mats, v_K, v_w, v_h,
+                                recon_d, v_mats, v_K, v_w, v_h,
                                 output_type=output_type, device=device, ret_depth=True,
                             )
                             depth_loss  = _depth_loss(rendered_depth, v_depth, v_depth_mask)
-                            loss        = loss + cfg.train.loss.lambda_depth * depth_loss
-                            total_depth += depth_loss.item()
+                            frame_loss  = frame_loss + cfg.train.loss.lambda_depth * depth_loss
+                            seq_depth  += depth_loss.item()
                     else:
                         if use_depth:
                             rendered, rendered_depth = render_view(
-                                recon, v_mats, v_K, v_w, v_h,
+                                recon_d, v_mats, v_K, v_w, v_h,
                                 output_type=output_type, device=device, ret_depth=True,
                             )
                         else:
-                            rendered = render_view(recon, v_mats, v_K, v_w, v_h,
+                            rendered = render_view(recon_d, v_mats, v_K, v_w, v_h,
                                                    output_type=output_type, device=device)
                         photo_loss = _photometric_loss(rendered, v_gt, v_mask, cfg.train.loss)
-                        loss       = photo_loss
+                        frame_loss = photo_loss
                         if use_depth:
                             depth_loss  = _depth_loss(rendered_depth, v_depth, v_depth_mask)
-                            loss        = loss + cfg.train.loss.lambda_depth * depth_loss
-                            total_depth += depth_loss.item()
+                            frame_loss  = frame_loss + cfg.train.loss.lambda_depth * depth_loss
+                            seq_depth  += depth_loss.item()
 
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(),
-                                                   max_norm=cfg.train.grad_clip)
-                    optimizer.step()
+                    seq_photo    += photo_loss.item()
+                    seq_loss_val += frame_loss.item() / T
+                    # Backward through render only; frees the render graph.
+                    (frame_loss / T).backward()
+                    for j, rd in enumerate(_recon_d):
+                        if rd.grad is not None:
+                            _recon_grads[j].add_(rd.grad)
+                            rd.grad = None
 
-                    total_loss  += loss.item()
-                    total_photo += photo_loss.item()
-                    n_steps     += 1
+                _sync(device)
+                total_t_render += time.perf_counter() - _t0
 
+                # Single backward through the network using accumulated grads.
+                _t0 = time.perf_counter()
+                _active = [(s, g) for s, g in zip(_recon_src, _recon_grads)
+                           if s.requires_grad]
+                if _active:
+                    torch.autograd.backward(
+                        [s for s, _ in _active], [g for _, g in _active]
+                    )
+                torch.nn.utils.clip_grad_norm_(model.parameters(),
+                                               max_norm=cfg.train.grad_clip)
+                optimizer.step()
+                _sync(device)
+                total_t_backward += time.perf_counter() - _t0
+
+                total_loss   += seq_loss_val
+                total_photo  += seq_photo  / T
+                total_normal += seq_normal / T
+                total_depth  += seq_depth  / T
+                n_steps      += 1
+                if _profiler is not None:
+                    _profiler.step()
+
+            epoch_time = time.perf_counter() - t_epoch_start
             n_steps    = max(n_steps, 1)
             avg        = total_loss   / n_steps
             avg_photo  = total_photo  / n_steps
             avg_normal = total_normal / n_steps
             avg_depth  = total_depth  / n_steps
+            avg_t_forward  = total_t_forward  / n_steps
+            avg_t_render   = total_t_render   / n_steps
+            avg_t_backward = total_t_backward / n_steps
 
-            wandb_log: dict = {"train/loss": avg, "train/photo_loss": avg_photo}
+            wandb_log: dict = {
+                "train/loss": avg, "train/photo_loss": avg_photo,
+                "time/epoch_s": epoch_time,
+                "time/forward_ms": avg_t_forward * 1e3,
+                "time/render_ms": avg_t_render * 1e3,
+                "time/backward_ms": avg_t_backward * 1e3,
+            }
             if use_normals:
                 wandb_log["train/normal_loss"] = avg_normal
             if use_depth:
@@ -342,31 +446,26 @@ def main():
                     parts += [f"Photo={avg_photo:.6f}", f"Normal={avg_normal:.6f}"]
                 if use_depth:
                     parts.append(f"Depth={avg_depth:.6f}")
+                parts.append(
+                    f"t=[fwd={avg_t_forward*1e3:.1f}ms "
+                    f"rnd={avg_t_render*1e3:.1f}ms "
+                    f"bwd={avg_t_backward*1e3:.1f}ms "
+                    f"epoch={epoch_time:.1f}s]"
+                )
                 print(" | ".join(parts))
 
                 model.eval()
                 for si, (seq, splats_cpu) in enumerate(gaussian_cache.items()):
-                    # Find the batch for this sequence in the image loader
-                    for vis_batch in image_loader:
-                        if _seq_name(vis_batch) == seq:
-                            break
-
                     with torch.no_grad():
-                        frame0 = _slice_frame(vis_batch, 0)
+                        fd0 = frame_cache[seq][0]
+                        v0_mats = fd0["v_mats"].to(device)
+                        v0_K    = fd0["v_K"].to(device)
+                        v0_gt   = fd0["v_gt"].to(device)
+                        v0_h, v0_w = fd0["v_h"], fd0["v_w"]
                         if use_normals:
-                            v0_mats, v0_K, v0_gt, _, v0_h, v0_w, _, v0_gt_normals = \
-                                get_camera_params(frame0, device, ret_normals=True)
-                        else:
-                            v0_mats, v0_K, v0_gt, _, v0_h, v0_w = \
-                                get_camera_params(frame0, device)
-
+                            v0_gt_normals = fd0["v_gt_normals"].to(device)
                         if use_depth:
-                            depth_adj = frame0["depth_scale_adjustment"]
-                            if hasattr(depth_adj, "to"):
-                                depth_adj = depth_adj.to(device).view(-1, 1, 1, 1).float()
-                            else:
-                                depth_adj = float(depth_adj)
-                            v0_depth = frame0["depth_map"].to(device) * depth_adj
+                            v0_depth = fd0["v_depth"].to(device)
 
                         splats_vis = _subsample(_to_device(splats_cpu, device), max_points)
                         eval_recon = model.reconstruct_splats(splats_vis)
@@ -454,6 +553,10 @@ def main():
             art.add_file(str(output_dir / "ckpt_final.pt"))
             wandb.log_artifact(art)
     finally:
+        if _profiler is not None:
+            _profiler.__exit__(None, None, None)
+            print("\n=== Profiler: top ops by CUDA time ===")
+            print(_profiler.key_averages().table(sort_by="cuda_time_total", row_limit=25))
         if wandb_run is not None:
             wandb.finish()
 

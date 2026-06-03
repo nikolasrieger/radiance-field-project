@@ -4,5 +4,5 @@
 - [ ] test more local tokens for merging instead of global tokens
 - [ ] have another look at decoder (e.g. Can3Tok, DA3) - Leo
 - [ ] pointnet++ training stability check - maybe Leo 
-- [ ] 3D drag evaluation - Nikolas
-- [ ] improve training efficiency - Nikolas
+- [x] 3D drag evaluation - Nikolas
+- [x] improve training efficiency - Nikolas (70s -> 17s per epoch)

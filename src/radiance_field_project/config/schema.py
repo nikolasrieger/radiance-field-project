@@ -124,6 +124,9 @@ class TrainConfig:
     log_every: int = 10
     ckpt_every: int = 100
     grad_clip: float = 1.0
+    # Number of steps to profile with torch.profiler (0 = disabled).
+    # Skips 1 step + 1 warmup, then records this many steps.
+    profile_steps: int = 0
 
 
 @dataclass

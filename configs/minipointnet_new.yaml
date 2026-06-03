@@ -7,7 +7,7 @@ data:
   subset_lists_filename: /home/nrieger/radiance-field-project/set_lists_all-categories.sqlite
   num_supervision_views: 30
   num_workers: 4
-  num_sequences: 1       # how many sequences to load into the Gaussian cache
+  num_sequences: 10       # how many sequences to load into the Gaussian cache
   max_splats: 260000     # skip sequences with more splats than this
   max_points: 260000     # subsample Gaussians to at most this many per forward pass
   # Restrict to specific sequences for overfitting, or leave empty for full dataset.
@@ -18,12 +18,12 @@ model:
   output_type: gs2d
 
 train:
-  epochs: 1000
+  epochs: 100
   lr: 1e-4
   optimizer: adamw
   weight_decay: 0.0
   grad_clip: 1.0
-  log_every: 50
+  log_every: 20
   ckpt_every: 100
   loss:
     type: l2_masked
