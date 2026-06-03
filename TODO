@@ -6,3 +6,4 @@
 - [ ] pointnet++ training stability check - maybe Leo 
 - [x] 3D drag evaluation - Nikolas
 - [x] improve training efficiency - Nikolas (70s -> 17s per epoch)
+- [ ] visualize trainable samples from the current dataset - Leo

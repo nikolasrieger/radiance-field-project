@@ -1,0 +1,34 @@
+run:
+  name: 3dgs_small
+  seed: 42
+
+data:
+  num_supervision_views: 10
+  image_height: 512
+  image_width: 512
+  batch_size: 1
+  num_workers: 0
+  load_masks: true
+  load_depths: false
+  pick_sequences:
+    - "26-14460-30571"
+
+model:
+  output_type: gs2d
+  encoder: [128, 256, 1024]   # PointNet++ SA stage output widths (length 3)
+  decoder: [512, 256, 128]    # trunk MLP widths; last is head input dim
+  init_scale: 0.01
+  init_opacity: 0.1
+
+train:
+  epochs: 1000
+  lr: 1e-3
+  optimizer: adamw
+  weight_decay: 0.0
+  log_every: 50
+  ckpt_every: 500
+  grad_clip: 1.0
+  loss:
+    type: l2_masked
+    lambda_ssim: 0.2
+    lambda_normal: 0.2   # >0 enables normal supervision; requires output_type=gs2d
