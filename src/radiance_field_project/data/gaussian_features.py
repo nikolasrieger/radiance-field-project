@@ -1,6 +1,4 @@
 """Conversions between ``GaussianSplats`` objects and flat feature tensors."""
-from typing import Mapping
-
 import torch
 import torch.nn.functional as F
 
@@ -56,9 +54,12 @@ def batch_to_features(sample) -> tuple[torch.Tensor, torch.Tensor]:
     (one per batch item). Returns:
         features:  ``[total_N, 14]`` — all Gaussians concatenated.
         batch_idx: ``[total_N]``    — which scene each Gaussian belongs to.
+
+    Uses bracket-access so this works whether ``sample`` is a ``UCO3DFrameData``
+    (which is a ``Mapping`` and forwards ``__getitem__`` to ``getattr``) or a
+    plain ``dict`` (as some uco3d versions return after collation).
     """
-    splats = sample["sequence_gaussian_splats"] if isinstance(sample, Mapping) else sample.sequence_gaussian_splats
-    feats_list = [gaussians_to_features(gs) for gs in splats]
+    feats_list = [gaussians_to_features(gs) for gs in sample["sequence_gaussian_splats"]]
     features = torch.cat(feats_list, dim=0)
     batch_idx = torch.cat([
         torch.full((f.shape[0],), i, dtype=torch.long)
