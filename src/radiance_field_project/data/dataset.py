@@ -1,4 +1,4 @@
-# src/radiance_field_project/data/dataset.py
+# src/data/dataset.py
 """Factory functions for constructing UCO3DDataset instances."""
 from pathlib import Path
 from typing import Sequence
@@ -20,6 +20,7 @@ def make_uco3d_dataset(
     box_crop: bool = True,
     image_height: int = 800,
     image_width: int = 800,
+    single_sequence: bool = True
 ) -> UCO3DDataset:
     """Build a UCO3DDataset with project-level defaults.
 
@@ -51,6 +52,14 @@ def make_uco3d_dataset(
         image_height=image_height,
         image_width=image_width,
     )
+
+    if single_sequence:
+        return UCO3DDataset(
+            subset_lists_file=str(subset_lists_file),
+            subsets=list(subsets),
+            frame_data_builder=frame_data_builder,
+            pick_sequences=('26-14460-30571',),
+        )
 
     return UCO3DDataset(
         subset_lists_file=str(subset_lists_file),

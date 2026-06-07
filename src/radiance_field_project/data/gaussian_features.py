@@ -6,44 +6,26 @@ from uco3d.dataset_utils.frame_data import GaussianSplats
 
 
 def gaussians_to_features(gs: GaussianSplats) -> torch.Tensor:
-    """Convert a single GaussianSplats object to an ``[N, 14]`` tensor.
-
-    Scales are stored in log-space so the network sees an unbounded target;
-    :func:`features_to_gaussians` is the exact inverse on positive scales.
-    """
     return torch.cat([
-        gs.means,                                   # [N, 3]
-        gs.sh0,                                     # [N, 3]
-        gs.opacities.unsqueeze(-1),                 # [N, 1]
-        torch.log(gs.scales.clamp_min(1e-8)),       # [N, 3]  log-space
-        gs.quats,                                   # [N, 4]  unit-norm by convention
-    ], dim=-1)                                      # [N, 14]
+        gs.means,                       # [N, 3]
+        gs.sh0,                         # [N, 3]
+        gs.opacities.unsqueeze(-1),     # [N, 1]
+        gs.scales,                      # [N, 3]  
+        gs.quats,                       # [N, 4]
+    ], dim=-1)                          # [N, 14]
 
 
 def features_to_gaussians(features: torch.Tensor) -> GaussianSplats:
-    """Convert an ``[N, 14]`` tensor back to a ``GaussianSplats`` instance.
-
-    Inverse of :func:`gaussians_to_features`. Feature layout:
-        ``[means(3), sh0(3), opacities(1), log_scales(3), quats(4)]``.
-
-    Decode-side guarantees for the rasterizer:
-    - ``scales`` are exponentiated, so they are strictly positive.
-    - ``quats`` are L2-normalized to unit length.
-    """
-    assert features.shape[-1] == 14, f"expected last dim 14, got {features.shape[-1]}"
-
-    means     = features[..., 0:3].contiguous()                              # [N, 3]
-    sh0       = features[..., 3:6].unsqueeze(-2).contiguous()                # [N, 1, 3]
-    opacities = features[..., 6:7].squeeze(-1).contiguous()                  # [N]
-    scales    = torch.exp(features[..., 7:10]).contiguous()                  # [N, 3]
-    quats     = F.normalize(features[..., 10:14], dim=-1).contiguous()       # [N, 4]
+    assert features.shape[-1] == 14
 
     return GaussianSplats(
-        means=means,
-        sh0=sh0,
-        opacities=opacities,
-        scales=scales,
-        quats=quats,
+        means     = features[..., 0:3].contiguous(),
+        sh0       = features[..., 3:6].contiguous(),
+        opacities = features[..., 6].contiguous(),       # raw logits — render_splats applies sigmoid
+        scales    = features[..., 7:10].contiguous(),    # raw log    — render_splats applies exp
+        quats     = F.normalize(features[..., 10:14], dim=-1).contiguous(),
+        shN       = None,
+        fg_mask   = None,
     )
 
 

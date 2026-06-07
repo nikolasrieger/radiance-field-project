@@ -6,10 +6,13 @@ __pycache__/
 .Python
 *.egg
 *.egg-info/
+*.deb
 dist/
 build/
 wheels/
+*.png
 *.whl
+logs_*/
 
 # uv
 .venv/
@@ -75,4 +78,8 @@ desktop.ini
 wandb/
 
 #Claude
-.claude/
+.claude
+
+# Checkpoints
+checkpoints/
+configs/

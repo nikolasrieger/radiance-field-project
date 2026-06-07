@@ -1,0 +1,3 @@
+uv run python src/radiance_field_project/training/train_overfit_2dgs_normal_multiseq.py
+uv run python src/radiance_field_project/training/train_overfit_minipointnet.py
+uv run python src/radiance_field_project/training/train_overfit_2dgs_normal_ghead.py
