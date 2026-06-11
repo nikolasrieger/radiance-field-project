@@ -156,8 +156,16 @@ class SplatRefiner(nn.Module):
         if len(decoder) == 0:
             raise ValueError("decoder must contain at least one width")
 
-        in_channel = 6 if normal_channel else 3
+        # The encoder consumes the full per-splat vector: xyz drives the
+        # spatial grouping (FPS / ball query) while the remaining splat
+        # attributes (sh0, scales, quats, opacity) are fed as per-point
+        # features. `feat_dim` is everything in the splat vector except the
+        # 3 mean/xyz channels.
+        self.feat_dim = splat_dim - 3
         self.normal_channel = normal_channel
+        # SA1 sees grouped_xyz_norm (3) concatenated with the per-point
+        # features, plus optional normals.
+        in_channel = 3 + self.feat_dim + (3 if normal_channel else 0)
 
         # Build SA stack — each stage's internal MLP expands prev→prev→out.
         sa_modules = []
@@ -205,13 +213,16 @@ class SplatRefiner(nn.Module):
                             init_scale=init_scale,
                             init_opacity=init_opacity)
 
-    def encode_multiscale(self, means_b):
-        """``means_b``: ``(1, N, 3)`` raw splat means.
+    def encode_multiscale(self, means_b, feats_b=None):
+        """``means_b``: ``(1, N, 3)`` raw splat means; ``feats_b``:
+        ``(1, N, feat_dim)`` per-point splat attributes (sh0, scales, quats,
+        opacity) or ``None``.
 
         Normalizes the cloud to the unit sphere, FPS-downsamples to 1024
-        points, runs the SA stack, and returns the global feature along
-        with the normalization params so callers can apply the same
-        normalization to the per-point trunk input.
+        points (gathering the matching point features), runs the SA stack,
+        and returns the global feature along with the normalization params
+        so callers can apply the same normalization to the per-point trunk
+        input.
 
         Returns:
             global_feat: ``(B, 1024)``.
@@ -227,7 +238,12 @@ class SplatRefiner(nn.Module):
         pts = index_points(means_normed, idx)
 
         xyz_t = pts.permute(0, 2, 1)
-        l1_xyz, l1_pts = self.sa1(xyz_t, None)
+        # Gather the per-point features at the same FPS indices and hand them
+        # to SA1 as the point feature channels (B, feat_dim, 1024).
+        feats_t = None
+        if feats_b is not None:
+            feats_t = index_points(feats_b, idx).permute(0, 2, 1)
+        l1_xyz, l1_pts = self.sa1(xyz_t, feats_t)
         l2_xyz, l2_pts = self.sa2(l1_xyz, l1_pts)
         _,      l3_pts = self.sa3(l2_xyz, l2_pts)
         global_feat = l3_pts.view(means_b.shape[0], -1)
@@ -252,7 +268,13 @@ class SplatRefiner(nn.Module):
         scales_in = splats.scales[:, :scale_dim]
 
         N = means.shape[0]
-        global_feat, centroid, cloud_scale = self.encode_multiscale(means.unsqueeze(0))
+        # Per-point splat attributes (everything except xyz) fed to the
+        # encoder alongside the geometry.
+        encoder_feats = torch.cat([
+            sh0, scales_in, quats, opacities.unsqueeze(-1)
+        ], dim=-1)                                                # (N, feat_dim)
+        global_feat, centroid, cloud_scale = self.encode_multiscale(
+            means.unsqueeze(0), encoder_feats.unsqueeze(0))
         global_feat = global_feat.expand(N, -1)
         means_normed = (means - centroid[0, 0]) / (cloud_scale[0, 0] + 1e-8)
 
