@@ -69,19 +69,35 @@ def _slice_frame(batch: dict, i: int) -> dict:
 
 # ── gaussian cache helpers ────────────────────────────────────────────────────
 
-def _cache_splat(raw: GaussianSplats, is_2dgs: bool) -> GaussianSplats:
-    """Convert a raw UCO3D GaussianSplats to a CPU float tensor, optionally
-    canonicalizing for 2DGS (thin axis → position 2)."""
+_LINPRIM_DIST_TO_SCALE = 2.6
+
+
+def _cache_splat(raw: GaussianSplats, output_type: str) -> GaussianSplats:
+    """Convert a raw UCO3D GaussianSplats to a CPU float tensor.
+
+    - ``'3dgs'``: scales stay as ``(N, 3)`` log-space.
+    - ``'2dgs'``: canonicalize so the thin axis is at position 2.
+    - ``'linprim'``: derive a single symmetric distance from the geometric
+      mean of the 3DGS scales (scaled by DIST_TO_SCALE=2.6) and store as
+      ``scales (N, 1)``.  ``render_view`` applies ``abs`` and expands to
+      ``(N, 3)`` for the symmetric octahedron rasterizer.
+    """
     means     = raw.means.float().cpu()
     sh0       = raw.sh0.float().cpu()
     scales    = raw.scales.float().cpu()
     quats     = raw.quats.float().cpu()
     opacities = raw.opacities.float().cpu()
 
-    if is_2dgs:
+    if output_type == "2dgs":
         scales2d, quats = to_2dgs_canonical(scales, quats)
         thin   = scales.min(dim=-1, keepdim=True).values
         scales = torch.cat([scales2d, thin], dim=-1)  # (N, 3) canonical
+    elif output_type == "linprim":
+        # Max 3DGS scale axis → linprim dist.  Using the max (rather than
+        # geometric mean) avoids near-invisible octahedra for thin/small
+        # Gaussians where the mean log-scale is very negative.
+        dist   = torch.exp(scales.max(dim=-1, keepdim=True).values) * _LINPRIM_DIST_TO_SCALE
+        scales = dist  # (N, 1)
 
     return GaussianSplats(means=means, sh0=sh0, scales=scales, quats=quats,
                           opacities=opacities, shN=None, fg_mask=None)
@@ -180,11 +196,10 @@ def main():
         art.add_file(str(output_dir / "config.yaml"))
         wandb.log_artifact(art)
 
-    output_type = cfg.model.output_type.value   # "3dgs" | "2dgs"
-    is_2dgs     = output_type == "2dgs"
+    output_type = cfg.model.output_type.value   # "3dgs" | "2dgs" | "linprim"
     use_normals = cfg.train.loss.lambda_normal > 0
     use_depth   = cfg.train.loss.lambda_depth  > 0
-    if use_normals and not is_2dgs:
+    if use_normals and output_type != "2dgs":
         raise ValueError(
             "loss.lambda_normal > 0 requires model.output_type=gs2d "
             "(only the 2dgs rasterizer produces surface normals)"
@@ -220,7 +235,7 @@ def main():
     for batch in splat_loader:
         seq = _seq_name(batch)
         raw = batch["sequence_gaussian_splats"][0]
-        gaussian_cache[seq] = _cache_splat(raw, is_2dgs)
+        gaussian_cache[seq] = _cache_splat(raw, output_type)
         print(f"  {seq}: {raw.means.shape[0]} points")
         if num_sequences is not None and len(gaussian_cache) >= num_sequences:
             break
@@ -471,14 +486,19 @@ def main():
                         eval_recon = model.reconstruct_splats(splats_vis)
                         image_path = output_dir / f"epoch_{epoch:05d}_seq{si:02d}.png"
 
+                        # The linprim cache collapses scales to a single dist
+                        # (N, 1), which the 3DGS rasterizer can't consume, so
+                        # render the un-refined reference through the linprim
+                        # rasterizer instead.
+                        ref_output_type = "linprim" if output_type == "linprim" else "3dgs"
                         if use_depth:
                             ref_render, ref_depth = render_view(
                                 splats_vis, v0_mats, v0_K, v0_w, v0_h,
-                                output_type="3dgs", device=device, ret_depth=True,
+                                output_type=ref_output_type, device=device, ret_depth=True,
                             )
                         else:
                             ref_render = render_view(splats_vis, v0_mats, v0_K, v0_w, v0_h,
-                                                     output_type="3dgs", device=device)
+                                                     output_type=ref_output_type, device=device)
 
                         if use_normals:
                             eval_rgb, eval_normals = render_view(
@@ -515,7 +535,7 @@ def main():
                         rows = [torch.cat([v0_gt.permute(0,2,3,1),
                                            ref_render.permute(0,2,3,1),
                                            eval_rgb.permute(0,2,3,1)], dim=2)]
-                        labels = ["GT", "Reference (3DGS)", f"Recon @ {epoch}"]
+                        labels = ["GT", f"Reference ({ref_output_type})", f"Recon @ {epoch}"]
 
                         if use_normals:
                             rows.append(torch.cat([_nrm(v0_gt_normals).permute(0,2,3,1),

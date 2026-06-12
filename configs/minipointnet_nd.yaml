@@ -1,5 +1,5 @@
 run:
-  name: minipointnet_2dgs_d_n_full_0.2_maxp
+  name: minipointnet_2dgs_d_n_full_0.2_maxp_30
   wandb_mode: online
 
 data:
@@ -7,7 +7,7 @@ data:
   subset_lists_filename: /home/nrieger/radiance-field-project/set_lists_all-categories.sqlite
   num_supervision_views: 30
   num_workers: 4
-  num_sequences: 10       # how many sequences to load into the Gaussian cache
+  num_sequences: 30       # how many sequences to load into the Gaussian cache
   max_splats: 260000     # skip sequences with more splats than this
   max_points: 260000     # subsample Gaussians to at most this many per forward pass
   # Restrict to specific sequences for overfitting, or leave empty for full dataset.
@@ -18,7 +18,7 @@ model:
   output_type: gs2d
 
 train:
-  epochs: 100
+  epochs: 1000
   lr: 1e-4
   optimizer: adamw
   weight_decay: 0.0

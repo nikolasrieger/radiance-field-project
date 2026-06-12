@@ -10,12 +10,17 @@ by side for two camera views.  Each row shows [RGB | Normals | Depth].
   Row 3: 3DGS (View 2)
   Row 4: 2DGS pred (V 2)
 
+Also computes per-frame losses over up to --n-eval views (same losses as
+training: photometric L2+SSIM, depth L1, normal cosine/L1) and prints a
+summary table.
+
 Usage
 -----
     cd radiance-field-project
     uv run python evaluate_splat.py --run runs/minipointnet_2dgs_d_n_full_0.2_maxp
     uv run python evaluate_splat.py --run runs/pointnet2_2dgs_d_n_full_0.2_maxp --seed 7
     uv run python evaluate_splat.py --run runs/... --ckpt ckpt_00500.pt --out out.png
+    uv run python evaluate_splat.py --run runs/... --n-eval 20
 """
 from __future__ import annotations
 
@@ -25,6 +30,7 @@ import sys
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from uco3d.dataset_utils.data_types import Cameras
 
@@ -32,6 +38,7 @@ from uco3d.dataset_utils.data_types import Cameras
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from radiance_field_project.config import load_config
+from radiance_field_project.config.schema import NormalLossType, NormalRegion
 from radiance_field_project.data.collate import uco3d_collate
 from radiance_field_project.data.datamodule import UCO3DDataModule, SequenceBatchSampler
 from radiance_field_project.data.dataset import make_uco3d_dataset
@@ -48,6 +55,8 @@ from radiance_field_project.training.train import (
     _cache_splat,
     _to_device,
     _subsample,
+    _depth_loss,
+    _photometric_loss,
 )
 
 
@@ -77,6 +86,21 @@ def _frame_dict(batch, i: int) -> dict:
         "camera":                 _slice_camera(batch["camera"], i),
         "depth_scale_adjustment": 1.0,  # not used; we don't call ret_normals=True
     }
+
+
+def _frame_dict_with_depth(batch, i: int) -> dict:
+    """Like _frame_dict but includes depth map/mask and depth_scale_adjustment."""
+    dsa = batch["depth_scale_adjustment"]
+    frame = {
+        "image_rgb":              batch["image_rgb"][i : i + 1],
+        "fg_probability":         batch["fg_probability"][i : i + 1],
+        "camera":                 _slice_camera(batch["camera"], i),
+        "depth_scale_adjustment": dsa[i : i + 1] if torch.is_tensor(dsa) else dsa,
+    }
+    if "depth_map" in batch:
+        frame["depth_map"]  = batch["depth_map"][i : i + 1]
+        frame["depth_mask"] = batch["depth_mask"][i : i + 1]
+    return frame
 
 
 # ── visualisation helpers ─────────────────────────────────────────────────────
@@ -123,6 +147,8 @@ def parse_args():
                    help="RNG seed for sequence selection (default: 0)")
     p.add_argument("--out",  default=None,
                    help="Output PNG path (default: <run>/eval_splat_seed<N>.png)")
+    p.add_argument("--n-eval", type=int, default=10,
+                   help="Number of views to average losses over (default: 10; 0 = skip)")
     return p.parse_args()
 
 
@@ -278,6 +304,109 @@ def main():
         columns=3,
     )
     print(f"Saved → {out_path}")
+
+    # ── loss evaluation over N views ──────────────────────────────────────────
+    n_eval = args.n_eval
+    if n_eval <= 0:
+        return
+
+    loss_cfg   = cfg.train.loss
+    use_depth  = loss_cfg.lambda_depth  > 0
+    use_normal = loss_cfg.lambda_normal > 0 and is_2dgs
+
+    # Reload the image dataset with depths if needed.
+    eval_ds = make_uco3d_dataset(
+        subsets=("train",),
+        subset_lists_filename=str(cfg.data.subset_lists_filename),
+        dataset_root=str(cfg.data.dataset_root),
+        load_images=True,
+        load_depths=use_depth or use_normal,
+        load_masks=True,
+        load_gaussian_splats=False,
+        image_height=int(cfg.data.image_height),
+        image_width=int(cfg.data.image_width),
+        pick_sequences=[seq_name],
+    )
+    eval_loader = DataLoader(
+        eval_ds,
+        batch_sampler=SequenceBatchSampler(eval_ds, shuffle=False),
+        num_workers=0,
+        collate_fn=uco3d_collate,
+    )
+
+    total_photo = total_depth = total_normal = 0.0
+    n_frames = 0
+
+    with torch.no_grad():
+        for batch in eval_loader:
+            T = batch["image_rgb"].shape[0]
+            indices = list(range(min(n_eval - n_frames, T)))
+            for i in indices:
+                frame = _frame_dict_with_depth(batch, i)
+                has_depth = "depth_map" in frame
+
+                if use_normal and has_depth:
+                    vmats, K, gt_image, fg_mask, h, w, _, gt_normals = \
+                        get_camera_params(frame, device, ret_normals=True)
+                    rendered, rendered_normals_world = render_view(
+                        splat_pred, vmats, K, w, h,
+                        output_type=out_type, device=device, ret_normals=True,
+                    )
+                    normals_cam = world_normals_to_camera(rendered_normals_world, vmats)
+                    depth_valid = (gt_normals.norm(dim=1, keepdim=True) > 0.5).float()
+                    if loss_cfg.normal_region == NormalRegion.foreground:
+                        normal_mask = (fg_mask > 0.5).float() * depth_valid
+                    else:
+                        normal_mask = depth_valid
+                    if loss_cfg.normal_loss_type == NormalLossType.cosine:
+                        dot = (normals_cam * gt_normals).sum(dim=1, keepdim=True).clamp(-1.0, 1.0)
+                        normal_loss = ((1.0 - dot) * normal_mask).mean().item()
+                    else:
+                        normal_loss = F.l1_loss(
+                            normals_cam * normal_mask, gt_normals * normal_mask
+                        ).item()
+                    total_normal += normal_loss
+                else:
+                    vmats, K, gt_image, fg_mask, h, w = get_camera_params(frame, device)
+                    rendered, rendered_depth = render_view(
+                        splat_pred, vmats, K, w, h,
+                        output_type=out_type, device=device, ret_depth=True,
+                    )
+
+                photo_loss = _photometric_loss(rendered, gt_image, fg_mask, loss_cfg).item()
+                total_photo += photo_loss
+
+                if (use_depth or not use_normal) and has_depth:
+                    if use_normal and has_depth:
+                        _, rendered_depth = render_view(
+                            splat_pred, vmats, K, w, h,
+                            output_type=out_type, device=device, ret_depth=True,
+                        )
+                    dsa = frame["depth_scale_adjustment"]
+                    if hasattr(dsa, "to"):
+                        dsa = dsa.to(device).view(-1, 1, 1, 1).float()
+                    gt_depth  = frame["depth_map"].to(device) * dsa
+                    depth_mask = (frame["depth_mask"].to(device) > 0.5).float()
+                    depth_loss = _depth_loss(rendered_depth, gt_depth, depth_mask).item()
+                    total_depth += depth_loss
+
+                n_frames += 1
+                if n_frames >= n_eval:
+                    break
+            if n_frames >= n_eval:
+                break
+
+    print()
+    print(f"{'─'*44}")
+    print(f"  Loss summary  ({n_frames} views,  seq={seq_name})")
+    print(f"{'─'*44}")
+    print(f"  Photo (L2+SSIM):  {total_photo / n_frames:.6f}")
+    if use_depth:
+        print(f"  Depth (L1):       {total_depth / n_frames:.6f}")
+    if use_normal:
+        ntype = loss_cfg.normal_loss_type.value if hasattr(loss_cfg.normal_loss_type, 'value') else str(loss_cfg.normal_loss_type)
+        print(f"  Normal ({ntype}):   {total_normal / n_frames:.6f}")
+    print(f"{'─'*44}")
 
 
 if __name__ == "__main__":

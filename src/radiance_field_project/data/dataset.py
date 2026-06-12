@@ -39,7 +39,15 @@ def make_uco3d_dataset(
             sequence loads the full subset.
     """
     p = Path(subset_lists_filename)
-    subset_lists_file = p if p.is_absolute() else Path(UCO3D_DATASET_ROOT) / "set_lists" / subset_lists_filename
+    if p.is_absolute():
+        subset_lists_file = p
+    else:
+        # Try the canonical layout first (UCO3D_DATASET_ROOT/set_lists/<name>),
+        # then fall back to UCO3D_DATASET_ROOT/<name> directly (e.g. when the
+        # sqlite is placed at the dataset/project root without a set_lists/ subdir).
+        canonical = Path(UCO3D_DATASET_ROOT) / "set_lists" / subset_lists_filename
+        flat      = Path(UCO3D_DATASET_ROOT) / subset_lists_filename
+        subset_lists_file = canonical if canonical.exists() else flat
     if not subset_lists_file.exists():
         raise FileNotFoundError(
             f"Subset list not found: {subset_lists_file}. "

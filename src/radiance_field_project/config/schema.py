@@ -12,6 +12,7 @@ class WandbMode(Enum):
 class OutputType(Enum):
     gs3d = "3dgs"
     gs2d = "2dgs"
+    linprim = "linprim"
 
 
 class Activation(Enum):

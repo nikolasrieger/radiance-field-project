@@ -1,6 +1,6 @@
 import torch
-from gsplat import rasterization, rasterization_2dgs
 import torch.nn.functional as F
+from gsplat import rasterization, rasterization_2dgs
 from uco3d import GaussianSplats
 from uco3d.dataset_utils.utils import opencv_cameras_projection_from_uco3d
 
@@ -33,6 +33,67 @@ def get_camera_params(sample, device, ret_normals=False):
     return viewmats, K, gt_image, fg_mask, h, w
 
 
+def _make_linprim_camera(
+    viewmats: torch.Tensor,
+    Ks: torch.Tensor,
+    width: int,
+    height: int,
+    znear: float = 0.01,
+    zfar: float = 100.0,
+    device=None,
+):
+    """Convert gsplat-style camera params to the format expected by the
+    diff_linear_rasterization CUDA kernel (3DGS column-major convention).
+
+    Args:
+        viewmats: ``(1, 4, 4)`` world-to-camera matrix (OpenCV row-major).
+        Ks: ``(1, 3, 3)`` intrinsic matrix.
+
+    Returns:
+        tanfovx, tanfovy: half-FOV tangents.
+        world_view_transform: ``(4, 4)`` column-major W2C (i.e. viewmats[0].T).
+        full_proj_transform: ``(4, 4)`` world-to-clip in column-major order.
+        campos: ``(3,)`` camera centre in world space.
+    """
+    vm = viewmats[0].to(device=device, dtype=torch.float32)   # (4, 4) W2C
+    K  = Ks[0].to(device=device, dtype=torch.float32)          # (3, 3)
+
+    fx, fy = K[0, 0].item(), K[1, 1].item()
+    tanfovx = width  / (2.0 * fx)
+    tanfovy = height / (2.0 * fy)
+
+    # 3DGS stores W2C transposed (column-major) so the CUDA kernel can do
+    # column-major matrix-vector products.  Must be contiguous — .T alone
+    # returns a non-contiguous view which causes illegal memory access in
+    # the CUDA kernel.
+    world_view_transform = vm.T.contiguous()   # (4, 4)
+
+    # OpenGL-style perspective matrix (matches getProjectionMatrix in the
+    # linprim repo's utils/graphics_utils.py).
+    top    =  tanfovy * znear
+    right  =  tanfovx * znear
+    P = torch.zeros(4, 4, device=device, dtype=torch.float32)
+    P[0, 0] = 2.0 * znear / (2.0 * right)
+    P[1, 1] = 2.0 * znear / (2.0 * top)
+    P[3, 2] = 1.0
+    P[2, 2] = zfar / (zfar - znear)
+    P[2, 3] = -(zfar * znear) / (zfar - znear)
+    projection_matrix = P.T.contiguous()   # column-major
+
+    full_proj_transform = (
+        world_view_transform.unsqueeze(0)
+        .bmm(projection_matrix.unsqueeze(0))
+        .squeeze(0)
+    )   # bmm output is already contiguous
+
+    # Camera centre in world space.  The 3DGS convention stores world_view_transform
+    # as W2C.T, so its inverse is C2W.T; row 3 of C2W.T equals column 3 of C2W,
+    # which is the translation (camera centre).
+    campos = world_view_transform.inverse()[3, :3]
+
+    return tanfovx, tanfovy, world_view_transform, full_proj_transform, campos
+
+
 def render_view(
     splats: GaussianSplats,
     viewmats: torch.Tensor,
@@ -56,6 +117,74 @@ def render_view(
         raise ValueError("ret_normals=True is only supported for output_type='2dgs'")
 
     device = device or splats.means.device
+
+    # ── LinPrim path ──────────────────────────────────────────────────────────
+    if output_type == "linprim":
+        try:
+            from diff_linear_rasterization import (
+                LinearRasterizationSettings,
+                LinearRasterizer,
+            )
+        except ImportError as exc:
+            raise RuntimeError(
+                "diff_linear_rasterization is not installed. "
+                "Build it from https://github.com/nicolasvonluetzow/linear-splatting "
+                "submodules/diff-linear-rasterization and install with pip."
+            ) from exc
+
+        tanfovx, tanfovy, world_view_transform, full_proj_transform, campos = \
+            _make_linprim_camera(viewmats, Ks, width, height, device=device)
+
+        # All inputs must be contiguous — the linprim C++ kernel uses raw
+        # stride-3/4 flat access and does not call .contiguous() itself.
+        # Slices from reconstruct_splats output have strides like (12,1)
+        # instead of (3,1), causing the kernel to read garbage data and
+        # overflow tile buffers.
+        means3D   = splats.means.contiguous()
+        dists     = splats.scales.abs().expand(-1, 3).contiguous()
+        opacities = torch.sigmoid(splats.opacities.flatten()).unsqueeze(-1).contiguous()
+        quats     = F.normalize(splats.quats, p=2, dim=-1).contiguous()
+        # SH degree 0: (N, 1, 3). The C++ binding infers the SH coefficient
+        # count as M = sh.size(1), and the kernel strides idx * M vec3s per
+        # point. sh0 is (N, 3), so unsqueeze(1) -> (N, 1, 3) gives M=1 (one
+        # coefficient, 3 channels). Using unsqueeze(-1) -> (N, 3, 1) would set
+        # M=3, making the kernel read 9 floats/point from a 3-float/point
+        # buffer and overrun it (illegal memory access).
+        shs = splats.sh0.contiguous().unsqueeze(1)
+
+        subpixel_offset = torch.zeros(height, width, 2,
+                                      device=device, dtype=torch.float32)
+        raster_settings = LinearRasterizationSettings(
+            image_height=height,
+            image_width=width,
+            tanfovx=tanfovx,
+            tanfovy=tanfovy,
+            kernel_size=0.0,
+            subpixel_offset=subpixel_offset,
+            bg=torch.zeros(3, device=device),
+            scale_modifier=1.0,
+            viewmatrix=world_view_transform,
+            projmatrix=full_proj_transform,
+            sh_degree=0,
+            campos=campos,
+            prefiltered=False,
+            debug=False,
+        )
+        screenspace_pts = torch.zeros_like(means3D, requires_grad=True)
+        rasterizer = LinearRasterizer(raster_settings=raster_settings)
+        rendered_image, _ = rasterizer(
+            means3D=means3D,
+            means2D=screenspace_pts,
+            shs=shs,
+            colors_precomp=None,
+            opacities=opacities,
+            dists=dists,
+            rotations=quats,
+        )
+        # rendered_image: (3, H, W) → (1, 3, H, W)
+        return rendered_image.unsqueeze(0)
+
+    # ── 3DGS / 2DGS path ─────────────────────────────────────────────────────
     quats = F.normalize(splats.quats, p=2, dim=-1)
     opacities = torch.sigmoid(splats.opacities.flatten())
     if output_type == "3dgs":
