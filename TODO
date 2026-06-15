@@ -1,10 +1,11 @@
 ## Todo
-- [ ] do some ablation runs - maybe Nikolas
+- [x] do some ablation runs - maybe Nikolas
 - [ ] feed features into encoder as well - Leo
-- [ ] test more local tokens for merging instead of global tokens
+- [ ] test more local tokens for merging instead of global tokens - Nikolas
 - [ ] have another look at decoder (e.g. Can3Tok, DA3) - Leo
 - [ ] pointnet++ training stability check - maybe Leo 
 - [x] 3D drag evaluation - Nikolas
 - [x] improve training efficiency - Nikolas (70s -> 17s per epoch)
-- [ ] visualize trainable samples from the current dataset - Leo
+- [x] visualize trainable samples from the current dataset - Leo
 - [x] add a linprim version - maybe Nikolas (there is some error, check later)
+- [ ] linprim variant needs too much memory (-> OOM)

@@ -117,7 +117,7 @@ class GaussianHeadLinPrim(nn.Module):
     # the equivalent dist cap is 2.6 * exp(2). Without this bound, dist can grow
     # unbounded during training and balloon the octahedra, which explodes the
     # rasterizer's binning buffer (multi-GB allocation -> CUDA OOM).
-    DIST_MAX: float = 2.6 * math.exp(2.0)
+    DIST_MAX: float = 2.6 * math.exp(1.0)   # ≈7.1; exp(2) caused tile-buffer OOM
 
     def __init__(self, in_dim: int,
                  init_scale: float = 0.01,
@@ -217,7 +217,8 @@ class SplatRefiner(nn.Module):
                  normal_channel: bool = False,
                  init_scale: float = 0.01,
                  init_opacity: float = 0.1,
-                 freeze_encoder: bool = False):
+                 freeze_encoder: bool = False,
+                 encoder_in_channel: int | None = None):
         super().__init__()
         if output_format not in self._FORMATS:
             raise ValueError(
@@ -243,8 +244,13 @@ class SplatRefiner(nn.Module):
         self.feat_dim = splat_dim - 3
         self.normal_channel = normal_channel
         # SA1 sees grouped_xyz_norm (3) concatenated with the per-point
-        # features, plus optional normals.
-        in_channel = 3 + self.feat_dim + (3 if normal_channel else 0)
+        # features, plus optional normals.  encoder_in_channel lets callers
+        # override this (e.g. to load checkpoints trained with xyz-only input).
+        if encoder_in_channel is not None:
+            in_channel = encoder_in_channel
+            self.feat_dim = in_channel - 3 - (3 if normal_channel else 0)
+        else:
+            in_channel = 3 + self.feat_dim + (3 if normal_channel else 0)
 
         # Build SA stack — each stage's internal MLP expands prev→prev→out.
         sa_modules = []
@@ -354,12 +360,17 @@ class SplatRefiner(nn.Module):
 
         N = means.shape[0]
         # Per-point splat attributes (everything except xyz) fed to the
-        # encoder alongside the geometry.
-        encoder_feats = torch.cat([
-            sh0, scales_in, quats, opacities.unsqueeze(-1)
-        ], dim=-1)                                                # (N, feat_dim)
+        # encoder alongside the geometry.  feat_dim==0 means the encoder was
+        # trained on xyz only (old checkpoints), so pass None in that case.
+        if self.feat_dim > 0:
+            encoder_feats = torch.cat([
+                sh0, scales_in, quats, opacities.unsqueeze(-1)
+            ], dim=-1)                                            # (N, feat_dim)
+            encoder_feats_b = encoder_feats.unsqueeze(0)
+        else:
+            encoder_feats_b = None
         global_feat, centroid, cloud_scale = self.encode_multiscale(
-            means.unsqueeze(0), encoder_feats.unsqueeze(0))
+            means.unsqueeze(0), encoder_feats_b)
         global_feat = global_feat.expand(N, -1)
         means_normed = (means - centroid[0, 0]) / (cloud_scale[0, 0] + 1e-8)
 

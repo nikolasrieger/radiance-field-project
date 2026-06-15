@@ -9,7 +9,9 @@ data:
   num_workers: 4
   num_sequences: 10       # how many sequences to load into the Gaussian cache
   max_splats: 260000     # skip sequences with more splats than this
-  max_points: 260000     # subsample Gaussians to at most this many per forward pass
+  max_points: 100000     # subsample Gaussians to at most this many per forward pass
+  image_height: 400      # lower res keeps linprim tile-buffer within GPU memory
+  image_width: 400       # (tile buffer ∝ resolution², so 400² vs 800² = 4× less)
   # Restrict to specific sequences for overfitting, or leave empty for full dataset.
   pick_sequences: []
 

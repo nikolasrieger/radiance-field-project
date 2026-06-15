@@ -70,12 +70,14 @@ class MiniPointNet3DGSNetwork(nn.Module):
 
 
 class MiniPointNet2DGSNetwork(nn.Module):
-    def __init__(self, splat_dim: int = 13):
+    def __init__(self, splat_dim: int = 13, encoder_in_dim: int | None = None):
         super().__init__()
         self.splat_dim = splat_dim
+        enc_in = splat_dim if encoder_in_dim is None else encoder_in_dim
+        self.encoder_in_dim = enc_in
 
         self.point_encoder = nn.Sequential(
-            nn.Linear(splat_dim, 64), nn.LayerNorm(64),  nn.ReLU(),
+            nn.Linear(enc_in, 64), nn.LayerNorm(64),  nn.ReLU(),
             nn.Linear(64, 256),  nn.LayerNorm(256),   nn.ReLU(),
             nn.Linear(256, 512), nn.LayerNorm(512),   nn.ReLU(),
             nn.Linear(512, 1024),
@@ -92,7 +94,7 @@ class MiniPointNet2DGSNetwork(nn.Module):
         )
 
     def encode(self, feats_b: torch.Tensor) -> torch.Tensor:
-        """feats_b: (B, N, splat_dim) → (B, 1024)"""
+        """feats_b: (B, N, encoder_in_dim) → (B, 1024)"""
         return self.point_encoder(feats_b).max(dim=1).values
 
     def reconstruct_splats_2dgs(
@@ -105,7 +107,8 @@ class MiniPointNet2DGSNetwork(nn.Module):
     ) -> dict:
         N = means.shape[0]
         flat  = torch.cat([means, sh0, scales2d, quats, opacities.unsqueeze(-1)], dim=-1)
-        global_feat = self.encode(flat.unsqueeze(0)).expand(N, -1)  # (N, 1024)
+        enc_input = flat[..., :self.encoder_in_dim]
+        global_feat = self.encode(enc_input.unsqueeze(0)).expand(N, -1)  # (N, 1024)
 
         delta = self.decoder(torch.cat([global_feat, flat], dim=-1))  # (N, splat_dim)
 

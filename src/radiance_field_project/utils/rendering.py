@@ -141,7 +141,11 @@ def render_view(
         # instead of (3,1), causing the kernel to read garbage data and
         # overflow tile buffers.
         means3D   = splats.means.contiguous()
-        dists     = splats.scales.abs().expand(-1, 3).contiguous()
+        # Hard clamp: large dists → too many tiles per primitive → linprim
+        # tile-buffer overflow → cudaErrorIllegalAddress.  Cap matches the
+        # model head's DIST_MAX so training and reference renders stay in sync.
+        _DIST_RENDER_MAX = 7.07  # 2.6 * exp(1.0); matches GaussianHeadLinPrim.DIST_MAX
+        dists     = splats.scales.abs().clamp(max=_DIST_RENDER_MAX).expand(-1, 3).contiguous()
         opacities = torch.sigmoid(splats.opacities.flatten()).unsqueeze(-1).contiguous()
         quats     = F.normalize(splats.quats, p=2, dim=-1).contiguous()
         # SH degree 0: (N, 1, 3). The C++ binding infers the SH coefficient

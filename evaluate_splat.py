@@ -38,7 +38,7 @@ from uco3d.dataset_utils.data_types import Cameras
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from radiance_field_project.config import load_config
-from radiance_field_project.config.schema import NormalLossType, NormalRegion
+from radiance_field_project.config.schema import ModelConfig, ModelType, NormalLossType, NormalRegion
 from radiance_field_project.data.collate import uco3d_collate
 from radiance_field_project.data.datamodule import UCO3DDataModule, SequenceBatchSampler
 from radiance_field_project.data.dataset import make_uco3d_dataset
@@ -122,6 +122,34 @@ def _vis_depth(depth: torch.Tensor) -> torch.Tensor:
 
 # ── checkpoint loading ────────────────────────────────────────────────────────
 
+def _build_model_from_state(model_cfg: ModelConfig, state: dict):
+    """Build a model whose architecture matches the checkpoint state dict.
+
+    Handles old checkpoints trained with xyz-only encoder input (3 channels)
+    before per-splat features were added to the SA stack.
+    """
+    encoder_in_channel = None
+    splat_dim = None
+    encoder_in_dim = None
+
+    if model_cfg.model_type == ModelType.pointnet2:
+        w = state.get("sa1.mlp_convs.0.weight")
+        if w is not None:
+            encoder_in_channel = w.shape[1]
+    elif model_cfg.model_type == ModelType.minipointnet:
+        enc_w = state.get("point_encoder.0.weight")
+        dec_out_w = state.get("decoder.8.weight")  # output Linear: (splat_dim, 128)
+        if enc_w is not None:
+            encoder_in_dim = enc_w.shape[1]
+        if dec_out_w is not None:
+            splat_dim = dec_out_w.shape[0]
+
+    return build_model(model_cfg,
+                       encoder_in_channel=encoder_in_channel,
+                       splat_dim=splat_dim,
+                       encoder_in_dim=encoder_in_dim)
+
+
 def _find_ckpt(run_dir: Path, ckpt_name: str | None) -> Path:
     if ckpt_name is not None:
         return run_dir / ckpt_name
@@ -149,6 +177,9 @@ def parse_args():
                    help="Output PNG path (default: <run>/eval_splat_seed<N>.png)")
     p.add_argument("--n-eval", type=int, default=10,
                    help="Number of views to average losses over (default: 10; 0 = skip)")
+    p.add_argument("--all-losses", action="store_true",
+                   help="Evaluate all three losses (photo, depth, normal) regardless of "
+                        "training config lambdas")
     return p.parse_args()
 
 
@@ -168,8 +199,8 @@ def main():
     print(f"Output: {out_path}")
 
     # ── model ─────────────────────────────────────────────────────────────────
-    model = build_model(cfg.model).to(device)
     state = torch.load(ckpt, map_location=device, weights_only=True)
+    model = _build_model_from_state(cfg.model, state).to(device)
     model.load_state_dict(state)
     model.eval()
     n_params = sum(p.numel() for p in model.parameters())
@@ -204,9 +235,9 @@ def main():
 
     # ── prepare splats ────────────────────────────────────────────────────────
     # 3DGS input for reference renders (raw 3D Gaussians).
-    splat_3dgs_cpu = _cache_splat(raw_splat, is_2dgs=False)
+    splat_3dgs_cpu = _cache_splat(raw_splat, output_type="3dgs")
     # Canonical input for the model (2DGS: thin axis → position 2; 3DGS: unchanged).
-    splat_in_cpu   = _cache_splat(raw_splat, is_2dgs=is_2dgs)
+    splat_in_cpu   = _cache_splat(raw_splat, output_type=out_type)
 
     splat_3dgs_dev = _to_device(_subsample(splat_3dgs_cpu, max_points), device)
     splat_in_dev   = _to_device(_subsample(splat_in_cpu,   max_points), device)
@@ -311,8 +342,8 @@ def main():
         return
 
     loss_cfg   = cfg.train.loss
-    use_depth  = loss_cfg.lambda_depth  > 0
-    use_normal = loss_cfg.lambda_normal > 0 and is_2dgs
+    use_depth  = loss_cfg.lambda_depth  > 0 or args.all_losses
+    use_normal = (loss_cfg.lambda_normal > 0 or args.all_losses) and is_2dgs
 
     # Reload the image dataset with depths if needed.
     eval_ds = make_uco3d_dataset(
@@ -396,16 +427,24 @@ def main():
             if n_frames >= n_eval:
                 break
 
+    avg_photo  = total_photo  / n_frames
+    avg_depth  = total_depth  / n_frames
+    avg_normal = total_normal / n_frames
+    full_loss  = (avg_photo
+                  + loss_cfg.lambda_depth  * avg_depth
+                  + loss_cfg.lambda_normal * avg_normal)
+
     print()
     print(f"{'─'*44}")
     print(f"  Loss summary  ({n_frames} views,  seq={seq_name})")
     print(f"{'─'*44}")
-    print(f"  Photo (L2+SSIM):  {total_photo / n_frames:.6f}")
+    print(f"  Photo (L2+SSIM):  {avg_photo:.6f}")
     if use_depth:
-        print(f"  Depth (L1):       {total_depth / n_frames:.6f}")
+        print(f"  Depth (L1):       {avg_depth:.6f}")
     if use_normal:
         ntype = loss_cfg.normal_loss_type.value if hasattr(loss_cfg.normal_loss_type, 'value') else str(loss_cfg.normal_loss_type)
-        print(f"  Normal ({ntype}):   {total_normal / n_frames:.6f}")
+        print(f"  Normal ({ntype}):   {avg_normal:.6f}")
+    print(f"  Full (weighted):  {full_loss:.6f}")
     print(f"{'─'*44}")
 
 
