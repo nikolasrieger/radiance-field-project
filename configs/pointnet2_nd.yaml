@@ -4,7 +4,7 @@ run:
 
 data:
   dataset_root: /mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw
-  subset_lists_filename: /home/nrieger/radiance-field-project/set_lists_all-categories.sqlite
+  subset_lists_filename: /mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw/set_lists/set_lists_all-categories.sqlite
   num_supervision_views: 30
   num_workers: 4
   num_sequences: 30      # how many sequences to load into the Gaussian cache

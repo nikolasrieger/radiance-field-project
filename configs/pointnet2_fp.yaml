@@ -4,10 +4,11 @@ run:
 
 data:
   dataset_root: /mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw
-  subset_lists_filename: /home/nrieger/radiance-field-project/set_lists_all-categories.sqlite
+  subset_lists_filename: /mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw/set_lists/set_lists_all-categories.sqlite
   num_supervision_views: 30
   num_workers: 4
   num_sequences: 30      # how many sequences to load into the Gaussian cache
+  num_val_sequences: 5   # held-out "val" sequences for the per-epoch validation loss (0 = off)
   max_splats: 260000     # skip sequences with more splats than this
   max_points: 260000     # subsample Gaussians to at most this many per forward pass
   # Restrict to specific sequences for overfitting, or leave empty for full dataset.
@@ -30,6 +31,7 @@ train:
   weight_decay: 0.0
   grad_clip: 1.0
   log_every: 50
+  val_every: 1          # run the validation pass every N epochs
   ckpt_every: 100
   loss:
     type: l2_masked
