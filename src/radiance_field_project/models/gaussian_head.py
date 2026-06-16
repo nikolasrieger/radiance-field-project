@@ -6,6 +6,7 @@ import torch.nn.functional as F
 
 from radiance_field_project.models.pointnet2_utils import (
     PointNetSetAbstraction,
+    PointNetFeaturePropagation,
     farthest_point_sample,
     index_points,
 )
@@ -58,10 +59,15 @@ class _GaussianHeadBase(nn.Module):
                 anchor_sh0=None,
                 anchor_opacity_logit=None,
                 anchor_log_scale=None,
-                anchor_quats=None):
+                anchor_quats=None,
+                feat_appear=None):
+        # `x` carries geometry features (means/scale/quat); `feat_appear`, when
+        # provided by a dual-branch decoder, carries appearance features
+        # (sh0/opacity). Falls back to `x` for the single-feature path.
+        x_app = feat_appear if feat_appear is not None else x
         delta_means     = self.mean_head(x)
-        delta_sh0       = self.sh0_head(x)
-        delta_opacity   = self.opacity_head(x)
+        delta_sh0       = self.sh0_head(x_app)
+        delta_opacity   = self.opacity_head(x_app)
         delta_log_scale = self.scale_head(x)
         delta_quats     = self.quat_head(x)
 
@@ -149,10 +155,14 @@ class GaussianHeadLinPrim(nn.Module):
                 anchor_sh0=None,
                 anchor_opacity_logit=None,
                 anchor_dist=None,
-                anchor_quats=None):
+                anchor_quats=None,
+                feat_appear=None):
+        # See `_GaussianHeadBase.forward`: `x` is geometry, `feat_appear` is
+        # appearance (sh0/opacity) when a dual-branch decoder supplies it.
+        x_app = feat_appear if feat_appear is not None else x
         delta_means   = self.mean_head(x)
-        delta_sh0     = self.sh0_head(x)
-        delta_opacity = self.opacity_head(x)
+        delta_sh0     = self.sh0_head(x_app)
+        delta_opacity = self.opacity_head(x_app)
         delta_dist    = self.dist_head(x)
         delta_quats   = self.quat_head(x)
 
@@ -184,17 +194,29 @@ class GaussianHeadLinPrim(nn.Module):
 class SplatRefiner(nn.Module):
     """Gaussian-splat residual refiner.
 
-    A PointNet++ SA stack produces a ``(1, 1024)`` global feature; a
-    per-point MLP trunk consumes ``(global_feat ⊕ per-splat params)`` and
-    a format-specific head emits anchor-residual updates added to the
-    input splat. With the zero-initialized head this module is the
-    identity at step 0.
+    A PointNet++ SA stack encodes the cloud; a per-point decoder produces
+    per-point features and a format-specific head emits anchor-residual
+    updates added to the input splat. With the zero-initialized head this
+    module is the identity at step 0, regardless of decoder choice.
+
+    Two decoders are available:
+    - ``'trunk'`` (legacy): the SA stack collapses to a ``(1, 1024)`` global
+      feature, broadcast to every point and concatenated with that point's
+      raw params before a per-point MLP.
+    - ``'fp'`` (DA3-style): a PointNet++ Feature Propagation cascade upsamples
+      the multi-scale SA hierarchy coarse→fine back to the full input cloud,
+      so each point receives genuine multi-scale local features. With
+      ``dual_branch`` the decoded features split into a geometry branch
+      (means/scale/quat) and an appearance branch (sh0/opacity), mirroring
+      DA3's shared-reassemble / separate-fusion Dual-DPT head.
 
     Args:
-        output_format: ``'3dgs'`` (14 splat dims, ``GaussianHead3DGS``) or
-            ``'2dgs'`` (13 splat dims, ``GaussianHead2DGS``). Selects the
-            head type and the trunk input width; only the matching
-            ``reconstruct_*`` method is valid for a given instance.
+        output_format: ``'3dgs'`` (14 splat dims), ``'2dgs'`` (13 dims) or
+            ``'linprim'`` (12 dims). Selects the head type and decoder input
+            width.
+        decoder_type: ``'trunk'`` (default) or ``'fp'``.
+        dual_branch: split the FP-decoded features into geometry/appearance
+            branches. Only valid with ``decoder_type='fp'``.
     """
 
     _FORMATS = {
@@ -214,6 +236,8 @@ class SplatRefiner(nn.Module):
                  output_format: str = "3dgs",
                  encoder=(128, 256, 1024),
                  decoder=(512, 256, 128),
+                 decoder_type: str = "trunk",
+                 dual_branch: bool = False,
                  normal_channel: bool = False,
                  init_scale: float = 0.01,
                  init_opacity: float = 0.1,
@@ -224,7 +248,14 @@ class SplatRefiner(nn.Module):
             raise ValueError(
                 f"output_format must be one of {list(self._FORMATS)}, "
                 f"got {output_format!r}")
+        if decoder_type not in ("trunk", "fp"):
+            raise ValueError(
+                f"decoder_type must be 'trunk' or 'fp', got {decoder_type!r}")
+        if dual_branch and decoder_type != "fp":
+            raise ValueError("dual_branch=True requires decoder_type='fp'")
         self.output_format = output_format
+        self.decoder_type = decoder_type
+        self.dual_branch = dual_branch
         splat_dim, HeadCls = self._FORMATS[output_format]
 
         encoder = list(encoder)
@@ -281,22 +312,58 @@ class SplatRefiner(nn.Module):
                    + list(self.sa3.parameters()):
                 p.requires_grad_(False)
 
-        # Build the per-point trunk from `decoder`. Pattern matches the
-        # original: LayerNorm input, then Linear→LayerNorm→ReLU for each
-        # decoder width, omitting the LayerNorm on the final layer.
-        trunk_layers = [nn.LayerNorm(global_feat_dim + splat_dim)]
-        prev = global_feat_dim + splat_dim
-        for j, width in enumerate(decoder):
-            trunk_layers.append(nn.Linear(prev, width))
-            if j < len(decoder) - 1:
-                trunk_layers.append(nn.LayerNorm(width))
-            trunk_layers.append(nn.ReLU())
-            prev = width
-        self.trunk = nn.Sequential(*trunk_layers)
+        self.splat_dim = splat_dim
+        head_in = decoder[-1]
 
-        self.head = HeadCls(decoder[-1],
+        if decoder_type == "trunk":
+            # Legacy per-point trunk over (global feat ⊕ params). Pattern
+            # matches the original: LayerNorm input, then Linear→LayerNorm→ReLU
+            # for each decoder width, omitting the LayerNorm on the final layer.
+            trunk_layers = [nn.LayerNorm(global_feat_dim + splat_dim)]
+            prev = global_feat_dim + splat_dim
+            for j, width in enumerate(decoder):
+                trunk_layers.append(nn.Linear(prev, width))
+                if j < len(decoder) - 1:
+                    trunk_layers.append(nn.LayerNorm(width))
+                trunk_layers.append(nn.ReLU())
+                prev = width
+            self.trunk = nn.Sequential(*trunk_layers)
+        else:
+            # DA3-style Feature Propagation decoder: upsample the multi-scale SA
+            # hierarchy coarse→fine (RefineNet-style), so every point receives
+            # genuine multi-scale local features. FP MLP widths come from
+            # `decoder`; the final FP outputs `head_in` for the head.
+            #   l3 (global) --fp3--> l2 --fp2--> l1 --fp1--> l0 (1024) --fp0--> N
+            d0 = decoder[0]
+            d1 = decoder[1] if len(decoder) > 1 else decoder[-1]
+            d2 = decoder[2] if len(decoder) > 2 else decoder[-1]
+            e0, e1, e2 = encoder  # SA1, SA2, SA3 output widths
+            self.fp3 = PointNetFeaturePropagation(e1 + e2, [d0, d0])
+            self.fp2 = PointNetFeaturePropagation(e0 + d0, [d1, d1])
+            # fp1 skips the per-point splat features carried at the 1024 FPS
+            # points (width feat_dim; 0 for xyz-only encoders). Source is fp2's
+            # output (width d1).
+            self.fp1 = PointNetFeaturePropagation(self.feat_dim + d1, [d2, d2])
+            # fp0 upsamples to the full N input cloud; its skip is the raw
+            # per-point splat vector (the DPT skip-to-input-resolution analog).
+            self.fp0 = PointNetFeaturePropagation(splat_dim + d2, [d2, head_in])
+            if dual_branch:
+                self.geom_branch = self._branch_mlp(head_in)
+                self.appear_branch = self._branch_mlp(head_in)
+
+        self.head = HeadCls(head_in,
                             init_scale=init_scale,
                             init_opacity=init_opacity)
+
+    @staticmethod
+    def _branch_mlp(width: int) -> nn.Module:
+        """Small per-point branch head: Linear→LayerNorm→ReLU→Linear."""
+        return nn.Sequential(
+            nn.Linear(width, width),
+            nn.LayerNorm(width),
+            nn.ReLU(),
+            nn.Linear(width, width),
+        )
 
     def encode_multiscale(self, means_b, feats_b=None):
         """``means_b``: ``(1, N, 3)`` raw splat means; ``feats_b``:
@@ -306,13 +373,16 @@ class SplatRefiner(nn.Module):
         Normalizes the cloud to the unit sphere, FPS-downsamples to 1024
         points (gathering the matching point features), runs the SA stack,
         and returns the global feature along with the normalization params
-        so callers can apply the same normalization to the per-point trunk
+        so callers can apply the same normalization to the per-point decoder
         input.
 
         Returns:
             global_feat: ``(B, 1024)``.
             centroid:    ``(B, 1, 3)``.
             scale:       ``(B, 1, 1)`` — max distance from centroid.
+            levels:      dict of the per-level ``(xyz, pts)`` SA outputs in
+                ``[B, C, S]`` layout (``l0`` = the 1024 FPS points, ``l3`` =
+                global). Consumed by the FP decoder; ignored by the trunk.
         """
         centroid = means_b.mean(dim=1, keepdim=True)
         means_centered = means_b - centroid
@@ -330,9 +400,15 @@ class SplatRefiner(nn.Module):
             feats_t = index_points(feats_b, idx).permute(0, 2, 1)
         l1_xyz, l1_pts = self.sa1(xyz_t, feats_t)
         l2_xyz, l2_pts = self.sa2(l1_xyz, l1_pts)
-        _,      l3_pts = self.sa3(l2_xyz, l2_pts)
+        l3_xyz, l3_pts = self.sa3(l2_xyz, l2_pts)
         global_feat = l3_pts.view(means_b.shape[0], -1)
-        return global_feat, centroid, scale
+        levels = {
+            "l0_xyz": xyz_t,   "l0_pts": feats_t,
+            "l1_xyz": l1_xyz,  "l1_pts": l1_pts,
+            "l2_xyz": l2_xyz,  "l2_pts": l2_pts,
+            "l3_xyz": l3_xyz,  "l3_pts": l3_pts,
+        }
+        return global_feat, centroid, scale, levels
 
     def reconstruct_splats(self, splats: GaussianSplats) -> GaussianSplats:
         """Refine ``splats`` and return a ``GaussianSplats`` of the same layout.
@@ -369,15 +445,37 @@ class SplatRefiner(nn.Module):
             encoder_feats_b = encoder_feats.unsqueeze(0)
         else:
             encoder_feats_b = None
-        global_feat, centroid, cloud_scale = self.encode_multiscale(
+        global_feat, centroid, cloud_scale, levels = self.encode_multiscale(
             means.unsqueeze(0), encoder_feats_b)
-        global_feat = global_feat.expand(N, -1)
         means_normed = (means - centroid[0, 0]) / (cloud_scale[0, 0] + 1e-8)
 
         flat = torch.cat([
             means_normed, sh0, scales_in, quats, opacities.unsqueeze(-1)
         ], dim=-1)                                          # (N, 12|13|14)
-        feats = self.trunk(torch.cat([global_feat, flat], dim=-1))
+
+        if self.decoder_type == "trunk":
+            global_feat = global_feat.expand(N, -1)
+            feats = self.trunk(torch.cat([global_feat, flat], dim=-1))
+            feat_appear = None
+        else:
+            # FP cascade coarse→fine, then upsample to the full N input cloud.
+            # All tensors are [B, C, S]; FP returns [B, D, S].
+            up2 = self.fp3(levels["l2_xyz"], levels["l3_xyz"],
+                           levels["l2_pts"], levels["l3_pts"])      # (1, d0, 128)
+            up1 = self.fp2(levels["l1_xyz"], levels["l2_xyz"],
+                           levels["l1_pts"], up2)                    # (1, d1, 512)
+            up0 = self.fp1(levels["l0_xyz"], levels["l1_xyz"],
+                           levels["l0_pts"], up1)                    # (1, d2, 1024)
+            full_xyz  = means_normed.unsqueeze(0).permute(0, 2, 1)   # (1, 3, N)
+            full_skip = flat.unsqueeze(0).permute(0, 2, 1)           # (1, splat_dim, N)
+            per_point = self.fp0(full_xyz, levels["l0_xyz"],
+                                 full_skip, up0)                     # (1, head_in, N)
+            feats = per_point.squeeze(0).permute(1, 0)               # (N, head_in)
+            if self.dual_branch:
+                feat_appear = self.appear_branch(feats)
+                feats = self.geom_branch(feats)
+            else:
+                feat_appear = None
 
         if is_linprim:
             out = self.head(
@@ -387,6 +485,7 @@ class SplatRefiner(nn.Module):
                 anchor_opacity_logit=opacities.unsqueeze(-1),
                 anchor_dist=scales_in,
                 anchor_quats=quats,
+                feat_appear=feat_appear,
             )                                               # (N, 12)
         else:
             out = self.head(
@@ -396,6 +495,7 @@ class SplatRefiner(nn.Module):
                 anchor_opacity_logit=opacities.unsqueeze(-1),
                 anchor_log_scale=scales_in,
                 anchor_quats=quats,
+                feat_appear=feat_appear,
             )                                               # (N, 13|14)
 
         means_r   = out[..., 0:3]

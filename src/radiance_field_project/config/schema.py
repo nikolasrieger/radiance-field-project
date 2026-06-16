@@ -88,9 +88,18 @@ class ModelConfig:
     # (the final stage is group_all=True and produces the global feature).
     # Only used when model_type=pointnet2.
     encoder: List[int] = field(default_factory=lambda: [128, 256, 1024])
-    # Linear widths of the per-point trunk MLP. The last value is the head
+    # Linear widths of the per-point decoder MLP. The last value is the head
     # input dim. Variable length is supported. Only used when model_type=pointnet2.
+    #   decoder_type="trunk": legacy per-point MLP trunk over (global feat ⊕ params)
+    #   decoder_type="fp":    PointNet++ Feature Propagation upsampling decoder;
+    #                         `decoder` supplies the FP-stage MLP widths.
     decoder: List[int] = field(default_factory=lambda: [512, 256, 128])
+    # Decoder variant. "trunk" (default, legacy global-broadcast) or "fp"
+    # (DA3-style multi-scale upsampling decoder).
+    decoder_type: str = "trunk"
+    # Split the FP-decoded features into a geometry branch (means/scale/quat)
+    # and an appearance branch (sh0/opacity). Only meaningful with decoder_type="fp".
+    dual_branch: bool = False
     init_scale: float = 0.01
     init_opacity: float = 0.1
 
