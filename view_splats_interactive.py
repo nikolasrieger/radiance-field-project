@@ -111,13 +111,16 @@ def main():
     print(f"Device: {device}")
 
     # ── model ──────────────────────────────────────────────────────────────────
-    model = build_model(cfg.model).to(device)
     state = torch.load(ckpt, map_location=device, weights_only=True)
+    # Detect SA1 input width from checkpoint to handle old xyz-only checkpoints.
+    ckpt_in_ch = None
+    if "sa1.mlp_convs.0.weight" in state:
+        ckpt_in_ch = state["sa1.mlp_convs.0.weight"].shape[1]
+    model = build_model(cfg.model, encoder_in_channel=ckpt_in_ch).to(device)
     model.load_state_dict(state)
     model.eval()
 
     out_type   = cfg.model.output_type.value   # "2dgs" | "3dgs"
-    is_2dgs    = out_type == "2dgs"
     max_points = int(cfg.data.max_points) if cfg.data.max_points else 0
 
     # ── pick a random sequence ─────────────────────────────────────────────────
@@ -143,8 +146,8 @@ def main():
     print(f"Sequence: {seq_name}  ({raw_splat.means.shape[0]:,} raw points)")
 
     # ── prepare and run model ─────────────────────────────────────────────────
-    splat_3dgs_cpu = _cache_splat(raw_splat, is_2dgs=False)
-    splat_in_cpu   = _cache_splat(raw_splat, is_2dgs=is_2dgs)
+    splat_3dgs_cpu = _cache_splat(raw_splat, output_type='3dgs')
+    splat_in_cpu   = _cache_splat(raw_splat, output_type=out_type)
 
     splat_3dgs = _to_device(_subsample(splat_3dgs_cpu, max_points), device)
     splat_in   = _to_device(_subsample(splat_in_cpu,   max_points), device)
