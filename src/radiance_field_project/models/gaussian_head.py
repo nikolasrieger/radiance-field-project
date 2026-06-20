@@ -103,6 +103,84 @@ class GaussianHead2DGS(_GaussianHeadBase):
     SCALE_DIM = 2
 
 
+class GaussianHeadLinPrim(nn.Module):
+    """Per-point head for LinPrim octahedra. Output channels: 12
+    ``[means(3), sh0(3), opacity_logit(1), dist(1), quat(4)]``.
+
+    A single symmetric distance parameter describes each octahedron (abs
+    activation, not exp). Zero-initialized so the module is the identity
+    at step 0.
+    """
+
+    # Upper bound on |dist| (world units). The 3DGS/2DGS heads cap effective
+    # scale via log_scale.clamp(max=2.0) -> exp(2) sigma; with DIST_TO_SCALE=2.6
+    # the equivalent dist cap is 2.6 * exp(2). Without this bound, dist can grow
+    # unbounded during training and balloon the octahedra, which explodes the
+    # rasterizer's binning buffer (multi-GB allocation -> CUDA OOM).
+    DIST_MAX: float = 2.6 * math.exp(1.0)   # ≈7.1; exp(2) caused tile-buffer OOM
+
+    def __init__(self, in_dim: int,
+                 init_scale: float = 0.01,
+                 init_opacity: float = 0.1):
+        super().__init__()
+        self.mean_head    = nn.Linear(in_dim, 3)
+        self.sh0_head     = nn.Linear(in_dim, 3)
+        self.opacity_head = nn.Linear(in_dim, 1)
+        self.dist_head    = nn.Linear(in_dim, 1)
+        self.quat_head    = nn.Linear(in_dim, 4)
+
+        for h in [self.mean_head, self.sh0_head, self.opacity_head,
+                  self.dist_head, self.quat_head]:
+            nn.init.zeros_(h.weight)
+            nn.init.zeros_(h.bias)
+
+        opacity_logit = math.log(init_opacity / (1.0 - init_opacity))
+        self.register_buffer("default_opacity_logit",
+                             torch.tensor([opacity_logit]))
+        # LinPrim DIST_TO_SCALE = 2.6: octahedra cover 1/2.6 the volume of
+        # a Gaussian with the same standard deviation.
+        self.register_buffer("default_dist",
+                             torch.tensor([init_scale * 2.6]))
+        self.register_buffer("default_quat",
+                             torch.tensor([1.0, 0.0, 0.0, 0.0]))
+
+    def forward(self, x,
+                anchor_means=None,
+                anchor_sh0=None,
+                anchor_opacity_logit=None,
+                anchor_dist=None,
+                anchor_quats=None):
+        delta_means   = self.mean_head(x)
+        delta_sh0     = self.sh0_head(x)
+        delta_opacity = self.opacity_head(x)
+        delta_dist    = self.dist_head(x)
+        delta_quats   = self.quat_head(x)
+
+        means = delta_means + (anchor_means if anchor_means is not None else 0.0)
+        sh0   = delta_sh0   + (anchor_sh0   if anchor_sh0   is not None else 0.0)
+
+        opacity_logit = delta_opacity + (
+            anchor_opacity_logit if anchor_opacity_logit is not None
+            else self.default_opacity_logit
+        )
+        dist = delta_dist + (
+            anchor_dist if anchor_dist is not None else self.default_dist
+        )
+        quats = F.normalize(
+            delta_quats + (anchor_quats if anchor_quats is not None
+                           else self.default_quat),
+            dim=-1, eps=1e-6,
+        )
+
+        return torch.cat([
+            means,
+            sh0,
+            opacity_logit.clamp(-10.0, 10.0),
+            dist.clamp(-self.DIST_MAX, self.DIST_MAX),
+            quats,
+        ], dim=-1)
+
+
 class SplatRefiner(nn.Module):
     """Gaussian-splat residual refiner.
 
@@ -120,8 +198,9 @@ class SplatRefiner(nn.Module):
     """
 
     _FORMATS = {
-        "3dgs": (14, GaussianHead3DGS),
-        "2dgs": (13, GaussianHead2DGS),
+        "3dgs":    (14, GaussianHead3DGS),
+        "2dgs":    (13, GaussianHead2DGS),
+        "linprim": (12, GaussianHeadLinPrim),
     }
 
     # Spatial subsampling params for each SA stage (the final stage is
@@ -138,7 +217,8 @@ class SplatRefiner(nn.Module):
                  normal_channel: bool = False,
                  init_scale: float = 0.01,
                  init_opacity: float = 0.1,
-                 freeze_encoder: bool = False):
+                 freeze_encoder: bool = False,
+                 encoder_in_channel: int | None = None):
         super().__init__()
         if output_format not in self._FORMATS:
             raise ValueError(
@@ -156,8 +236,21 @@ class SplatRefiner(nn.Module):
         if len(decoder) == 0:
             raise ValueError("decoder must contain at least one width")
 
-        in_channel = 6 if normal_channel else 3
+        # The encoder consumes the full per-splat vector: xyz drives the
+        # spatial grouping (FPS / ball query) while the remaining splat
+        # attributes (sh0, scales, quats, opacity) are fed as per-point
+        # features. `feat_dim` is everything in the splat vector except the
+        # 3 mean/xyz channels.
+        self.feat_dim = splat_dim - 3
         self.normal_channel = normal_channel
+        # SA1 sees grouped_xyz_norm (3) concatenated with the per-point
+        # features, plus optional normals.  encoder_in_channel lets callers
+        # override this (e.g. to load checkpoints trained with xyz-only input).
+        if encoder_in_channel is not None:
+            in_channel = encoder_in_channel
+            self.feat_dim = in_channel - 3 - (3 if normal_channel else 0)
+        else:
+            in_channel = 3 + self.feat_dim + (3 if normal_channel else 0)
 
         # Build SA stack — each stage's internal MLP expands prev→prev→out.
         sa_modules = []
@@ -205,13 +298,16 @@ class SplatRefiner(nn.Module):
                             init_scale=init_scale,
                             init_opacity=init_opacity)
 
-    def encode_multiscale(self, means_b):
-        """``means_b``: ``(1, N, 3)`` raw splat means.
+    def encode_multiscale(self, means_b, feats_b=None):
+        """``means_b``: ``(1, N, 3)`` raw splat means; ``feats_b``:
+        ``(1, N, feat_dim)`` per-point splat attributes (sh0, scales, quats,
+        opacity) or ``None``.
 
         Normalizes the cloud to the unit sphere, FPS-downsamples to 1024
-        points, runs the SA stack, and returns the global feature along
-        with the normalization params so callers can apply the same
-        normalization to the per-point trunk input.
+        points (gathering the matching point features), runs the SA stack,
+        and returns the global feature along with the normalization params
+        so callers can apply the same normalization to the per-point trunk
+        input.
 
         Returns:
             global_feat: ``(B, 1024)``.
@@ -227,7 +323,12 @@ class SplatRefiner(nn.Module):
         pts = index_points(means_normed, idx)
 
         xyz_t = pts.permute(0, 2, 1)
-        l1_xyz, l1_pts = self.sa1(xyz_t, None)
+        # Gather the per-point features at the same FPS indices and hand them
+        # to SA1 as the point feature channels (B, feat_dim, 1024).
+        feats_t = None
+        if feats_b is not None:
+            feats_t = index_points(feats_b, idx).permute(0, 2, 1)
+        l1_xyz, l1_pts = self.sa1(xyz_t, feats_t)
         l2_xyz, l2_pts = self.sa2(l1_xyz, l1_pts)
         _,      l3_pts = self.sa3(l2_xyz, l2_pts)
         global_feat = l3_pts.view(means_b.shape[0], -1)
@@ -236,14 +337,20 @@ class SplatRefiner(nn.Module):
     def reconstruct_splats(self, splats: GaussianSplats) -> GaussianSplats:
         """Refine ``splats`` and return a ``GaussianSplats`` of the same layout.
 
-        Works for both ``output_format='3dgs'`` and ``'2dgs'``. For 2dgs only
-        the first two scale columns are refined; the third column is
-        re-emitted with a log-space sentinel value so the returned tensor
-        keeps a uniform ``(N, 3)`` shape (``render_view`` slices it back to
-        2D for 2dgs rasterization).
+        Handles ``output_format`` values ``'3dgs'``, ``'2dgs'``, and
+        ``'linprim'``.
+
+        - 3dgs: refines all 3 scale dimensions.
+        - 2dgs: refines 2 scale dimensions; pads a log-sentinel in position 2
+          so the returned ``scales`` tensor is always ``(N, 3)``.
+        - linprim: ``splats.scales`` holds a single raw distance per point
+          ``(N, 1)`` (set up by ``_cache_splat``); the head predicts an
+          additive residual. ``render_view`` applies ``abs`` and expands to
+          ``(N, 3)`` for the rasterizer.
         """
-        is_2dgs = self.output_format == "2dgs"
-        scale_dim = 2 if is_2dgs else 3
+        is_2dgs    = self.output_format == "2dgs"
+        is_linprim = self.output_format == "linprim"
+        scale_dim  = 1 if is_linprim else (2 if is_2dgs else 3)
 
         means     = splats.means
         sh0       = splats.sh0
@@ -252,29 +359,50 @@ class SplatRefiner(nn.Module):
         scales_in = splats.scales[:, :scale_dim]
 
         N = means.shape[0]
-        global_feat, centroid, cloud_scale = self.encode_multiscale(means.unsqueeze(0))
+        # Per-point splat attributes (everything except xyz) fed to the
+        # encoder alongside the geometry.  feat_dim==0 means the encoder was
+        # trained on xyz only (old checkpoints), so pass None in that case.
+        if self.feat_dim > 0:
+            encoder_feats = torch.cat([
+                sh0, scales_in, quats, opacities.unsqueeze(-1)
+            ], dim=-1)                                            # (N, feat_dim)
+            encoder_feats_b = encoder_feats.unsqueeze(0)
+        else:
+            encoder_feats_b = None
+        global_feat, centroid, cloud_scale = self.encode_multiscale(
+            means.unsqueeze(0), encoder_feats_b)
         global_feat = global_feat.expand(N, -1)
         means_normed = (means - centroid[0, 0]) / (cloud_scale[0, 0] + 1e-8)
 
         flat = torch.cat([
             means_normed, sh0, scales_in, quats, opacities.unsqueeze(-1)
-        ], dim=-1)                                                # (N, 13|14)
+        ], dim=-1)                                          # (N, 12|13|14)
         feats = self.trunk(torch.cat([global_feat, flat], dim=-1))
 
-        out = self.head(
-            feats,
-            anchor_means=means,
-            anchor_sh0=sh0,
-            anchor_opacity_logit=opacities.unsqueeze(-1),
-            anchor_log_scale=scales_in,
-            anchor_quats=quats,
-        )                                                         # (N, 13|14)
+        if is_linprim:
+            out = self.head(
+                feats,
+                anchor_means=means,
+                anchor_sh0=sh0,
+                anchor_opacity_logit=opacities.unsqueeze(-1),
+                anchor_dist=scales_in,
+                anchor_quats=quats,
+            )                                               # (N, 12)
+        else:
+            out = self.head(
+                feats,
+                anchor_means=means,
+                anchor_sh0=sh0,
+                anchor_opacity_logit=opacities.unsqueeze(-1),
+                anchor_log_scale=scales_in,
+                anchor_quats=quats,
+            )                                               # (N, 13|14)
 
-        means_r = out[..., 0:3]
-        sh0_r = out[..., 3:6]
+        means_r   = out[..., 0:3]
+        sh0_r     = out[..., 3:6]
         opacity_r = out[..., 6]
-        scales_r = out[..., 7:7 + scale_dim]
-        quats_r = out[..., 7 + scale_dim:11 + scale_dim]
+        scales_r  = out[..., 7:7 + scale_dim]
+        quats_r   = out[..., 7 + scale_dim:11 + scale_dim]
 
         if is_2dgs:
             z = torch.full(

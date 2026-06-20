@@ -83,3 +83,4 @@ wandb/
 # Checkpoints
 checkpoints/
 runs/
+2dgs_cache

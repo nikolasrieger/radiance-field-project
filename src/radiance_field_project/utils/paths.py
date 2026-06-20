@@ -3,6 +3,8 @@
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 
 def _find_project_root() -> Path:
     here = Path(__file__).resolve()
@@ -13,6 +15,10 @@ def _find_project_root() -> Path:
 
 
 PROJECT_ROOT = _find_project_root()
+
+# Load .env from the project root (does not override variables already set in
+# the shell environment, so explicit env vars always take precedence).
+load_dotenv(PROJECT_ROOT / ".env", override=False)
 
 _env_root = os.environ.get("UCO3D_DATASET_ROOT")
 _root_path = Path(_env_root) if _env_root else PROJECT_ROOT / "data" / "uco3d_data_raw"

@@ -114,10 +114,14 @@ class UCO3DDataModule:
     def test_loader(self) -> DataLoader:
         return self._make_loader(subsets=("test",), shuffle=False)
 
-    def splat_only_loader(self, max_splats: Optional[int] = None) -> DataLoader:
-        """DataLoader that skips image loading — useful for splat-only ablations."""
+    def splat_only_loader(self, max_splats: Optional[int] = None,
+                          subsets: Sequence[str] = ("train",)) -> DataLoader:
+        """DataLoader that skips image loading — useful for splat-only ablations.
+
+        ``subsets`` selects the split(s), e.g. ``("train",)`` or ``("val",)``.
+        """
         dataset = make_uco3d_dataset(
-            subsets=("train",),
+            subsets=subsets,
             subset_lists_filename=self.subset_lists_filename,
             dataset_root=self.dataset_root or None,
             load_images=False,
@@ -136,10 +140,15 @@ class UCO3DDataModule:
             collate_fn=uco3d_collate,
         )
 
-    def image_only_loader(self) -> DataLoader:
-        """DataLoader that skips splat loading — useful for image-only ablations."""
+    def image_only_loader(self, subsets: Sequence[str] = ("train",),
+                          shuffle: bool = True) -> DataLoader:
+        """DataLoader that skips splat loading — useful for image-only ablations.
+
+        ``subsets`` selects the split(s); ``shuffle`` controls sequence order
+        (pass ``False`` for deterministic validation).
+        """
         dataset = make_uco3d_dataset(
-            subsets=("train",),
+            subsets=subsets,
             subset_lists_filename=self.subset_lists_filename,
             dataset_root=self.dataset_root or None,
             load_images=True,
@@ -150,7 +159,7 @@ class UCO3DDataModule:
             image_width=self.image_width,
             pick_sequences=self.pick_sequences or None,
         )
-        sampler = SequenceBatchSampler(dataset, shuffle=True)
+        sampler = SequenceBatchSampler(dataset, shuffle=shuffle)
         return DataLoader(
             dataset,
             batch_sampler=sampler,
