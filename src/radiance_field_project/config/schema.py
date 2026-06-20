@@ -44,6 +44,7 @@ class NormalRegion(Enum):
 class ModelType(Enum):
     pointnet2 = "pointnet2"
     minipointnet = "minipointnet"
+    minipointnetpp = "minipointnetpp"
 
 
 @dataclass
@@ -78,6 +79,9 @@ class DataConfig:
     max_points: int = 0
     # Cap the number of sequences loaded into the Gaussian cache. 0 = all.
     num_sequences: int = 0
+    # Number of held-out sequences (from the "val" split) to evaluate the
+    # validation loss on after each epoch. 0 = validation disabled.
+    num_val_sequences: int = 0
 
 
 @dataclass
@@ -123,6 +127,8 @@ class TrainConfig:
     weight_decay: float = 0.0
     loss: LossConfig = field(default_factory=LossConfig)
     log_every: int = 10
+    # Run a validation pass every N epochs (requires data.num_val_sequences > 0).
+    val_every: int = 1
     ckpt_every: int = 100
     grad_clip: float = 1.0
     # Number of steps to profile with torch.profiler (0 = disabled).

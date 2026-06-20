@@ -1,0 +1,36 @@
+run:
+  name: minipointnetpp_2dgs_n_full_0.1_maxp_30
+  wandb_mode: online
+
+data:
+  dataset_root: /mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw
+  subset_lists_filename: /home/nrieger/radiance-field-project/set_lists_all-categories.sqlite
+  num_supervision_views: 30
+  num_workers: 4
+  num_sequences: 30      # how many sequences to load into the Gaussian cache
+  num_val_sequences: 5   # held-out "val" sequences for the per-epoch validation loss (0 = off)
+  max_splats: 260000     # skip sequences with more splats than this
+  max_points: 260000     # subsample Gaussians to at most this many per forward pass
+  pick_sequences: []
+
+model:
+  model_type: minipointnetpp
+  output_type: gs2d
+
+train:
+  epochs: 1000
+  lr: 1e-4
+  optimizer: adamw
+  weight_decay: 0.0
+  grad_clip: 1.0
+  log_every: 20
+  val_every: 1
+  ckpt_every: 100
+  loss:
+    type: l2_masked
+    normal_loss_type: cosine  # cosine or l1
+    normal_region: full       # full or foreground
+    recon_region: full        # full or foreground
+    lambda_ssim: 0.2
+    lambda_normal: 0.1
+    lambda_depth: 0.0

@@ -5,6 +5,7 @@ from radiance_field_project.models.gaussian_head import SplatRefiner
 from radiance_field_project.models.minipointnet import (
     MiniPointNet3DGSNetwork,
     MiniPointNet2DGSNetwork,
+    MiniPointNet2DGSNetworkPP,
 )
 
 
@@ -44,5 +45,13 @@ def build_model(model_config: ModelConfig,
         if encoder_in_dim is not None:
             kw["encoder_in_dim"] = encoder_in_dim
         return MiniPointNet2DGSNetwork(**kw)
+
+    if model_config.model_type == ModelType.minipointnetpp:
+        kw = {}
+        if splat_dim is not None:
+            kw["splat_dim"] = splat_dim
+        if encoder_in_dim is not None:
+            kw["encoder_in_dim"] = encoder_in_dim
+        return MiniPointNet2DGSNetworkPP(**kw)
 
     raise ValueError(f"Unknown model_type: {model_config.model_type}")

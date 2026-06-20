@@ -69,6 +69,88 @@ class MiniPointNet3DGSNetwork(nn.Module):
         )
 
 
+class MiniPointNet2DGSNetworkPP(nn.Module):
+    """MiniPointNet2DGS with a dual-branch decoder.
+
+    The encoder is identical to MiniPointNet2DGSNetwork (per-point MLP +
+    global max-pool → 1024). The decoder is split into two independent MLPs:
+    one for geometry (means / scales / quats) and one for appearance (sh0 /
+    opacity), so the model can specialise each branch without interference.
+    Both output layers are zero-initialised so the module is the identity at
+    step 0.
+    """
+
+    def __init__(self, splat_dim: int = 13, encoder_in_dim: int | None = None):
+        super().__init__()
+        self.splat_dim = splat_dim
+        enc_in = splat_dim if encoder_in_dim is None else encoder_in_dim
+        self.encoder_in_dim = enc_in
+
+        self.point_encoder = nn.Sequential(
+            nn.Linear(enc_in, 64),  nn.LayerNorm(64),  nn.ReLU(),
+            nn.Linear(64,  256),    nn.LayerNorm(256),  nn.ReLU(),
+            nn.Linear(256, 512),    nn.LayerNorm(512),  nn.ReLU(),
+            nn.Linear(512, 1024),
+        )
+
+        # geometry branch: means(3) + scales2d(2) + quats(4) = 9 dims
+        geom_out = nn.Linear(128, 9)
+        nn.init.zeros_(geom_out.weight)
+        nn.init.zeros_(geom_out.bias)
+        self.geom_decoder = nn.Sequential(
+            nn.Linear(1024 + splat_dim, 512), nn.LayerNorm(512), nn.ReLU(),
+            nn.Linear(512, 256),              nn.LayerNorm(256), nn.ReLU(),
+            nn.Linear(256, 128),                                 nn.ReLU(),
+            geom_out,
+        )
+
+        # appearance branch: sh0(3) + opacity(1) = 4 dims
+        appear_out = nn.Linear(128, 4)
+        nn.init.zeros_(appear_out.weight)
+        nn.init.zeros_(appear_out.bias)
+        self.appear_decoder = nn.Sequential(
+            nn.Linear(1024 + splat_dim, 512), nn.LayerNorm(512), nn.ReLU(),
+            nn.Linear(512, 256),              nn.LayerNorm(256), nn.ReLU(),
+            nn.Linear(256, 128),                                 nn.ReLU(),
+            appear_out,
+        )
+
+    def encode(self, feats_b: torch.Tensor) -> torch.Tensor:
+        """feats_b: (B, N, encoder_in_dim) → (B, 1024)"""
+        return self.point_encoder(feats_b).max(dim=1).values
+
+    def reconstruct_splats(self, splats: GaussianSplats) -> GaussianSplats:
+        means     = splats.means
+        sh0       = splats.sh0
+        scales2d  = splats.scales[:, :2]
+        quats     = splats.quats
+        opacities = splats.opacities
+
+        N    = means.shape[0]
+        flat = torch.cat([means, sh0, scales2d, quats, opacities.unsqueeze(-1)], dim=-1)
+        enc_input   = flat[..., :self.encoder_in_dim]
+        global_feat = self.encode(enc_input.unsqueeze(0)).expand(N, -1)  # (N, 1024)
+        trunk = torch.cat([global_feat, flat], dim=-1)
+
+        d_geom   = self.geom_decoder(trunk)    # (N, 9): means(0:3), scales(3:5), quats(5:9)
+        d_appear = self.appear_decoder(trunk)   # (N, 4): sh0(0:3), opacity(3)
+
+        scales_out = torch.cat([
+            scales2d + 0.01 * d_geom[:, 3:5].clamp(-1, 1),
+            splats.scales[:, 2:3],
+        ], dim=-1)
+
+        return GaussianSplats(
+            means     = means     + d_geom[:, 0:3],
+            sh0       = sh0       + d_appear[:, 0:3],
+            scales    = scales_out,
+            quats     = quats     + d_geom[:, 5:9],
+            opacities = opacities + d_appear[:, 3],
+            shN       = splats.shN,
+            fg_mask   = splats.fg_mask,
+        )
+
+
 class MiniPointNet2DGSNetwork(nn.Module):
     def __init__(self, splat_dim: int = 13, encoder_in_dim: int | None = None):
         super().__init__()
@@ -106,11 +188,25 @@ class MiniPointNet2DGSNetwork(nn.Module):
         opacities: torch.Tensor,
     ) -> dict:
         N = means.shape[0]
+        _dbg = means.is_cuda
+        if _dbg:
+            _a = torch.cuda.memory_allocated(means.device) / 1024**3
+            _r = torch.cuda.memory_reserved(means.device) / 1024**3
+            print(f"  [MODEL] reconstruct_splats_2dgs N={N}  alloc={_a:.2f}GB  reserv={_r:.2f}GB", flush=True)
         flat  = torch.cat([means, sh0, scales2d, quats, opacities.unsqueeze(-1)], dim=-1)
         enc_input = flat[..., :self.encoder_in_dim]
+        if _dbg:
+            _a = torch.cuda.memory_allocated(means.device) / 1024**3
+            print(f"  [MODEL] after flat cat  alloc={_a:.2f}GB  enc_input shape={enc_input.shape}", flush=True)
         global_feat = self.encode(enc_input.unsqueeze(0)).expand(N, -1)  # (N, 1024)
+        if _dbg:
+            _a = torch.cuda.memory_allocated(means.device) / 1024**3
+            print(f"  [MODEL] after encode  alloc={_a:.2f}GB  global_feat shape={global_feat.shape}", flush=True)
 
         delta = self.decoder(torch.cat([global_feat, flat], dim=-1))  # (N, splat_dim)
+        if _dbg:
+            _a = torch.cuda.memory_allocated(means.device) / 1024**3
+            print(f"  [MODEL] after decode  alloc={_a:.2f}GB", flush=True)
 
         return dict(
             means     = means     + delta[:, 0:3],
