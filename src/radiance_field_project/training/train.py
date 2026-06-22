@@ -29,7 +29,7 @@ from radiance_field_project.config.schema import LossType, NormalLossType, Norma
 from radiance_field_project.data.datamodule import UCO3DDataModule
 from radiance_field_project.models.model_factory import build_model
 from radiance_field_project.utils.gaussian_ops import to_2dgs_canonical
-from radiance_field_project.utils.losses import reconstruction_loss
+from radiance_field_project.utils.losses import reconstruction_loss, reconstruction_loss_l1
 from radiance_field_project.utils.rendering import get_camera_params, render_view, world_normals_to_camera
 from radiance_field_project.utils.splat_visualizer import SplatRenderVisualizer
 
@@ -149,6 +149,9 @@ def _photometric_loss(rendered, gt_image, fg_mask, loss_cfg):
     if loss_cfg.type == LossType.l2_masked:
         return reconstruction_loss(rendered, gt_image, mask=mask,
                                    lambda_ssim=loss_cfg.lambda_ssim)
+    if loss_cfg.type == LossType.l1:
+        return reconstruction_loss_l1(rendered, gt_image, mask=mask,
+                                      lambda_ssim=loss_cfg.lambda_ssim)
     if mask is not None:
         binary = (mask > 0.5).float()
         return ((rendered - gt_image).abs() * binary).sum() / binary.sum().clamp(min=1.0)

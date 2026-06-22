@@ -29,6 +29,7 @@ class Optimizer(Enum):
 class LossType(Enum):
     l2_masked = "l2_masked"
     l1_masked = "l1_masked"
+    l1 = "l1"
 
 
 class NormalLossType(Enum):
