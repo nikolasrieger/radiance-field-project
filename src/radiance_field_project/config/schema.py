@@ -29,6 +29,7 @@ class Optimizer(Enum):
 class LossType(Enum):
     l2_masked = "l2_masked"
     l1_masked = "l1_masked"
+    l1 = "l1"
 
 
 class NormalLossType(Enum):
@@ -44,6 +45,7 @@ class NormalRegion(Enum):
 class ModelType(Enum):
     pointnet2 = "pointnet2"
     minipointnet = "minipointnet"
+    minipointnetpp = "minipointnetpp"
 
 
 @dataclass

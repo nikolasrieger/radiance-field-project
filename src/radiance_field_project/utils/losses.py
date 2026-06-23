@@ -33,8 +33,18 @@ def ssim_loss(pred, gt):
     return 1.0 - ssim_map.mean()
 
 
+def l1_loss(pred, gt, mask=None):
+    abs_diff = (pred - gt).abs()
+    if mask is None:
+        return abs_diff.mean()
+    binary_mask = (mask > 0.5).float()
+    return (abs_diff * binary_mask).sum() / binary_mask.sum().clamp(min=1.0)
+
 def reconstruction_loss(pred, gt, mask=None, lambda_ssim=0.2):
     return (1.0 - lambda_ssim) * l2_loss(pred, gt, mask) +  lambda_ssim  * ssim_loss(pred, gt)
+
+def reconstruction_loss_l1(pred, gt, mask=None, lambda_ssim=0.2):
+    return (1.0 - lambda_ssim) * l1_loss(pred, gt, mask) + lambda_ssim * ssim_loss(pred, gt)
 
 
 def normal_consistency_loss(normals, mask=None):
