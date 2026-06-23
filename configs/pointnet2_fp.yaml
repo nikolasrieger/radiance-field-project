@@ -1,5 +1,5 @@
 run:
-  name: pointnet2_2dgs_fp_n_full_0.1_maxp_30
+  name: pointnet2_2dgs_depth_normal_0.1
   wandb_mode: online
 
 data:
@@ -34,10 +34,10 @@ train:
   val_every: 1          # run the validation pass every N epochs
   ckpt_every: 100
   loss:
-    type: l2_masked
+    type: l1_masked
     normal_loss_type: cosine  # cosine or l1
     normal_region: full       # full or foreground
     recon_region: full        # full or foreground
     lambda_ssim: 0.2
     lambda_normal: 0.1
-    lambda_depth: 0.0
+    lambda_depth: 0.1
