@@ -11,3 +11,7 @@
 - [ ] linprim variant needs too much memory (-> OOM)
 - [ ] add LR scheduler
 - [ ] run the metrics on the different models
+
+
+
+test different normal loss hparams, test l1 loss for reconstruction
