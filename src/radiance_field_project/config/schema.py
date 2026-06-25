@@ -98,6 +98,10 @@ class ModelConfig:
     decoder: List[int] = field(default_factory=lambda: [512, 256, 128])
     init_scale: float = 0.01
     init_opacity: float = 0.1
+    # Hidden dimension for minipointnet/minipointnetpp. Scales all layer widths
+    # as fractions of this value (h/16 → h/4 → h/2 → h for encoder,
+    # h/2 → h/4 → h/8 for decoder). Default 1024 = original architecture.
+    hidden_dim: int = 1024
 
 
 @dataclass
@@ -135,6 +139,9 @@ class TrainConfig:
     # Number of steps to profile with torch.profiler (0 = disabled).
     # Skips 1 step + 1 warmup, then records this many steps.
     profile_steps: int = 0
+    # Randomly sample this many views per scene per step from the frame cache.
+    # 0 = use all cached views (original behaviour).
+    num_views_per_step: int = 0
 
 
 @dataclass

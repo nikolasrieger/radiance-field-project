@@ -443,7 +443,13 @@ def main():
 
             for seq, cached_frames in frame_cache.items():
                 splats_cpu = gaussian_cache[seq]
-                T          = len(cached_frames)
+                n_step = cfg.train.num_views_per_step
+                if n_step > 0 and n_step < len(cached_frames):
+                    idxs = torch.randperm(len(cached_frames))[:n_step].tolist()
+                    step_frames = [cached_frames[i] for i in idxs]
+                else:
+                    step_frames = cached_frames
+                T = len(step_frames)
 
                 optimizer.zero_grad(set_to_none=True)
 
@@ -472,7 +478,7 @@ def main():
 
                 _sync(device)
                 _t0 = time.perf_counter()
-                for fd in cached_frames:
+                for fd in step_frames:
                     frame_loss, photo_loss, normal_loss, depth_loss = _frame_losses(
                         recon_d, fd, cfg.train.loss, output_type,
                         use_normals, use_depth, device,

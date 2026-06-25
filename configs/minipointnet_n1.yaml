@@ -5,9 +5,9 @@ run:
 data:
   dataset_root: /mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_raw
   subset_lists_filename: /home/nrieger/radiance-field-project/set_lists_all-categories.sqlite
-  num_supervision_views: 4
+  num_supervision_views: 50
   num_workers: 4
-  num_sequences: 30       # how many sequences to load into the Gaussian cache
+  num_sequences: 40       # how many sequences to load into the Gaussian cache
   max_splats: 260000     # skip sequences with more splats than this
   max_points: 260000     # subsample Gaussians to at most this many per forward pass
   # Restrict to specific sequences for overfitting, or leave empty for full dataset.
@@ -16,15 +16,17 @@ data:
 model:
   model_type: minipointnet
   output_type: gs2d
+  hidden_dim: 1024
 
 train:
   epochs: 1000
   lr: 1e-4
   optimizer: adamw
-  weight_decay: 0.0
+  weight_decay: 0.01
   grad_clip: 1.0
   log_every: 20
   ckpt_every: 100
+  num_views_per_step: 4
   loss:
     type: l1
     normal_loss_type: cosine  # cosine or l1

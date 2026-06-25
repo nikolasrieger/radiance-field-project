@@ -39,7 +39,7 @@ def build_model(model_config: ModelConfig,
     if model_config.model_type == ModelType.minipointnet:
         if model_config.output_type.value == "3dgs":
             return MiniPointNet3DGSNetwork()
-        kw = {}
+        kw = {"hidden_dim": model_config.hidden_dim}
         if splat_dim is not None:
             kw["splat_dim"] = splat_dim
         if encoder_in_dim is not None:
@@ -47,7 +47,7 @@ def build_model(model_config: ModelConfig,
         return MiniPointNet2DGSNetwork(**kw)
 
     if model_config.model_type == ModelType.minipointnetpp:
-        kw = {}
+        kw = {"hidden_dim": model_config.hidden_dim}
         if splat_dim is not None:
             kw["splat_dim"] = splat_dim
         if encoder_in_dim is not None:
