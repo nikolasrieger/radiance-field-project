@@ -153,7 +153,7 @@ class UCO3DDataModule:
             dataset_root=self.dataset_root or None,
             load_images=True,
             load_depths=True,
-            load_masks=True,
+            load_masks=self.load_masks,
             load_gaussian_splats=False,
             image_height=self.image_height,
             image_width=self.image_width,
