@@ -1,5 +1,7 @@
 # Radiance Field Project
 
+VERY IMPORTANT NOTE: ALWAYS USE FOREGROUND MASK!!!
+
 ## Setup
 
 1. Download the dataset via: ```uv run download-dataset --download_small_subset --download_folder ./data/uco3d_d
