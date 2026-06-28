@@ -7,10 +7,10 @@ data:
   subset_lists_filename: /home/nrieger/radiance-field-project/set_lists_big_baby.sqlite
   num_supervision_views: 50
   num_workers: 4
-  num_sequences: 280       # how many sequences to load into the Gaussian cache
+  num_sequences: 2      # how many sequences to load into the Gaussian cache
   max_splats: 260000     # skip sequences with more splats than this
   max_points: 260000     # subsample Gaussians to at most this many per forward pass
-  load_masks: false
+  load_masks: true
   pick_sequences: []
 
 model:
@@ -30,8 +30,8 @@ train:
   loss:
     type: l1
     normal_loss_type: cosine  # cosine or l1
-    normal_region: full       # full or foreground
-    recon_region: full        # full or foreground
+    normal_region: foreground
+    recon_region: foreground
     lambda_ssim: 0.0
     lambda_normal: 0.05
     lambda_depth: 0.0
