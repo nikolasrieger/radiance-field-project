@@ -152,6 +152,10 @@ def _photometric_loss(rendered, gt_image, fg_mask, loss_cfg):
     if loss_cfg.type == LossType.l1:
         return reconstruction_loss_l1(rendered, gt_image, mask=mask,
                                       lambda_ssim=loss_cfg.lambda_ssim)
+    if loss_cfg.type == LossType.l1_masked:
+        # Always mask the L1 term to the foreground, regardless of recon_region.
+        return reconstruction_loss_l1(rendered, gt_image, mask=fg_mask,
+                                      lambda_ssim=loss_cfg.lambda_ssim)
     if mask is not None:
         binary = (mask > 0.5).float()
         return ((rendered - gt_image).abs() * binary).sum() / binary.sum().clamp(min=1.0)
@@ -164,7 +168,8 @@ def _frame_losses(recon, fd, loss_cfg, output_type, use_normals, use_depth, devi
     Returns ``(frame_loss, photo_loss, normal_loss, depth_loss)`` as tensors;
     the normal/depth terms are zero tensors when their supervision is disabled.
     Shared by the training step and validation so both measure exactly the same
-    quantity.
+    quantity. ``recon`` is whatever splats object to render (the detached
+    ``recon_d`` during training, the live ``recon`` during validation).
     """
     v_mats = fd["v_mats"].to(device, non_blocking=True)
     v_K    = fd["v_K"].to(device, non_blocking=True)
@@ -192,7 +197,8 @@ def _frame_losses(recon, fd, loss_cfg, output_type, use_normals, use_depth, devi
             dot = (normals_cam * v_gt_normals).sum(dim=1, keepdim=True).clamp(-1.0, 1.0)
             normal_loss = ((1.0 - dot) * normal_mask).mean()
         else:
-            normal_loss = F.l1_loss(normals_cam * normal_mask, v_gt_normals * normal_mask)
+            normal_loss = F.l1_loss(normals_cam * normal_mask,
+                                    v_gt_normals * normal_mask)
         if use_depth:
             _, rendered_depth = render_view(
                 recon, v_mats, v_K, v_w, v_h,
@@ -216,7 +222,7 @@ def _frame_losses(recon, fd, loss_cfg, output_type, use_normals, use_depth, devi
 
     frame_loss = (photo_loss
                   + loss_cfg.lambda_normal * normal_loss
-                  + loss_cfg.lambda_depth  * depth_loss)
+                  + loss_cfg.lambda_depth * depth_loss)
     return frame_loss, photo_loss, normal_loss, depth_loss
 
 
@@ -231,7 +237,7 @@ def _validate(model, gaussian_cache, frame_cache, loss_cfg, output_type,
         frames = frame_cache.get(seq)
         if not frames:
             continue
-        T      = len(frames)
+        T = len(frames)
         splats = _subsample(_to_device(splats_cpu, device), max_points)
         recon  = model.reconstruct_splats(splats)
         s_loss = s_photo = s_normal = s_depth = 0.0
@@ -257,7 +263,9 @@ def _validate(model, gaussian_cache, frame_cache, loss_cfg, output_type,
 
 
 def _build_gaussian_cache(splat_loader, output_type, num_sequences, verbose=False):
-    """Preload per-sequence splats to CPU. ``num_sequences`` caps the count (``None`` = all)."""
+    """Preload per-sequence splats to CPU. ``num_sequences`` caps the count
+    (``None`` = all)."""
+    # Splats are per-sequence — only the first frame index is needed.
     splat_loader.batch_sampler._batches = [
         b[:1] for b in splat_loader.batch_sampler._batches
     ]
@@ -445,7 +453,7 @@ def main():
     n_cached = sum(len(v) for v in frame_cache.values())
     print(f"Frame cache: {n_cached} frames across {len(frame_cache)} sequences.\n")
 
-    # ── validation caches (held-out "val" split) ──────────────────────────────
+    # ── validation caches (held-out "val" split) ─────────────────────────────
     val_gaussian_cache: dict[str, GaussianSplats] = {}
     val_frame_cache: dict[str, list[dict]] = {}
     if num_val_seqs is not None:
@@ -592,7 +600,7 @@ def main():
             if use_depth:
                 wandb_log["train/depth_loss"] = avg_depth
 
-            # ── validation pass (held-out sequences, no gradients) ────────────
+            # ── validation pass (held-out sequences, no gradients) ──────────
             val_metrics = None
             if val_frame_cache and epoch % cfg.train.val_every == 0:
                 val_metrics = _validate(

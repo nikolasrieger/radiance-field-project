@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,6 +9,18 @@ import numpy as np
 def timeit(tag, t):
     print("{}: {}s".format(tag, time() - t))
     return time()
+
+
+def _group_norm(num_channels: int, max_groups: int = 32) -> nn.GroupNorm:
+    """Batch-size-independent normalization for the PointNet++ MLPs.
+
+    Replaces BatchNorm so train- and eval-mode behave identically (training
+    processes a single point cloud per step, so BatchNorm's running stats are
+    unreliable). GroupNorm requires num_channels % num_groups == 0; gcd
+    guarantees a valid divisor for any width.
+    """
+    groups = math.gcd(num_channels, max_groups)
+    return nn.GroupNorm(max(groups, 1), num_channels)
 
 def pc_normalize(pc):
     l = pc.shape[0]
@@ -169,7 +183,7 @@ class PointNetSetAbstraction(nn.Module):
         last_channel = in_channel
         for out_channel in mlp:
             self.mlp_convs.append(nn.Conv2d(last_channel, out_channel, 1))
-            self.mlp_bns.append(nn.BatchNorm2d(out_channel))
+            self.mlp_bns.append(_group_norm(out_channel))
             last_channel = out_channel
         self.group_all = group_all
 
@@ -216,7 +230,7 @@ class PointNetSetAbstractionMsg(nn.Module):
             last_channel = in_channel + 3
             for out_channel in mlp_list[i]:
                 convs.append(nn.Conv2d(last_channel, out_channel, 1))
-                bns.append(nn.BatchNorm2d(out_channel))
+                bns.append(_group_norm(out_channel))
                 last_channel = out_channel
             self.conv_blocks.append(convs)
             self.bn_blocks.append(bns)
@@ -270,7 +284,7 @@ class PointNetFeaturePropagation(nn.Module):
         last_channel = in_channel
         for out_channel in mlp:
             self.mlp_convs.append(nn.Conv1d(last_channel, out_channel, 1))
-            self.mlp_bns.append(nn.BatchNorm1d(out_channel))
+            self.mlp_bns.append(_group_norm(out_channel))
             last_channel = out_channel
 
     def forward(self, xyz1, xyz2, points1, points2):
