@@ -83,6 +83,8 @@ class DataConfig:
     # Number of held-out sequences (from the "val" split) to evaluate the
     # validation loss on after each epoch. 0 = validation disabled.
     num_val_sequences: int = 0
+    # Number of frames per validation sequence. 0 = same as num_supervision_views.
+    num_val_views: int = 0
 
 
 @dataclass
@@ -132,6 +134,8 @@ class TrainConfig:
     weight_decay: float = 0.0
     loss: LossConfig = field(default_factory=LossConfig)
     log_every: int = 10
+    # Cap the number of sequences logged as images to wandb per log step.
+    max_log_sequences: int = 5
     # Run a validation pass every N epochs (requires data.num_val_sequences > 0).
     val_every: int = 1
     ckpt_every: int = 100

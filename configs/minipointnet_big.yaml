@@ -7,7 +7,9 @@ data:
   subset_lists_filename: /home/nrieger/radiance-field-project/set_lists_big_baby.sqlite
   num_supervision_views: 50
   num_workers: 4
-  num_sequences: 2      # how many sequences to load into the Gaussian cache
+  num_sequences: 280      # how many sequences to load into the Gaussian cache
+  num_val_sequences: 10
+  num_val_views: 10
   max_splats: 260000     # skip sequences with more splats than this
   max_points: 260000     # subsample Gaussians to at most this many per forward pass
   load_masks: true
@@ -25,6 +27,7 @@ train:
   weight_decay: 0.01
   grad_clip: 1.0
   log_every: 20
+  max_log_sequences: 5
   ckpt_every: 100
   num_views_per_step: 4
   loss:

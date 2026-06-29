@@ -423,6 +423,7 @@ def main():
     num_sequences = cfg.data.num_sequences or None
     n_views       = cfg.data.num_supervision_views
     num_val_seqs  = cfg.data.num_val_sequences or None
+    n_val_views   = cfg.data.num_val_views or n_views
 
     print("Preloading Gaussian cache...")
     gaussian_cache = _build_gaussian_cache(
@@ -454,7 +455,7 @@ def main():
             output_type, num_val_seqs)
         val_frame_cache = _build_frame_cache(
             dm.image_only_loader(subsets=("val",), shuffle=False),
-            val_gaussian_cache, n_views, use_normals, use_depth,
+            val_gaussian_cache, n_val_views, use_normals, use_depth,
             cache_dir=output_dir / "frame_cache_val")
         n_val = sum(len(v) for v in val_frame_cache.values())
         if val_frame_cache:
@@ -622,6 +623,8 @@ def main():
 
                 model.eval()
                 for si, (seq, splats_cpu) in enumerate(gaussian_cache.items()):
+                    if si >= cfg.train.max_log_sequences:
+                        break
                     with torch.no_grad():
                         fd0 = frame_cache[seq][0]
                         v0_mats = fd0["v_mats"].to(device)
