@@ -12,3 +12,4 @@
 - [ ] add LR scheduler
 - [x] run the metrics on the different models
 - [ ] scheduler for trainings
+- [ ] test different normal loss hparams, test l1 loss for reconstruction

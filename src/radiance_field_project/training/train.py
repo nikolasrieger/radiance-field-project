@@ -57,7 +57,7 @@ def _slice_frame(batch: dict, i: int) -> dict:
     dsa = batch["depth_scale_adjustment"]
     frame = {
         "image_rgb":              batch["image_rgb"][i : i + 1],
-        "fg_probability":         batch["fg_probability"][i : i + 1],
+        "fg_probability":         batch["fg_probability"][i : i + 1] if batch["fg_probability"] is not None else torch.ones_like(batch["image_rgb"][i : i + 1, :1]),
         "camera":                 _slice_camera(batch["camera"], i),
         "depth_scale_adjustment": dsa[i : i + 1] if torch.is_tensor(dsa) else dsa,
     }
@@ -281,9 +281,50 @@ def _build_gaussian_cache(splat_loader, output_type, num_sequences, verbose=Fals
     return cache
 
 
-def _build_frame_cache(image_loader, gaussian_cache, n_views, use_normals, use_depth):
-    """Precompute per-sequence frame data (cameras / GT / normals / depth) on
-    CPU, subsampled to ``n_views`` frames and filtered to ``gaussian_cache``."""
+class DiskFrameCache:
+    """Frame cache backed by per-sequence .pt files on disk to avoid OOM on large datasets."""
+
+    def __init__(self, cache_dir: Path):
+        self._dir = cache_dir
+        self._dir.mkdir(parents=True, exist_ok=True)
+        self._keys: list[str] = []
+
+    def _path(self, seq: str) -> Path:
+        return self._dir / f"{seq}.pt"
+
+    def save(self, seq: str, frames: list[dict]) -> None:
+        torch.save(frames, self._path(seq))
+        self._keys.append(seq)
+
+    def get(self, seq: str) -> list[dict] | None:
+        p = self._path(seq)
+        return torch.load(p, weights_only=False) if p.exists() else None
+
+    def __getitem__(self, seq: str) -> list[dict]:
+        frames = self.get(seq)
+        if frames is None:
+            raise KeyError(seq)
+        return frames
+
+    def items(self):
+        for seq in self._keys:
+            yield seq, torch.load(self._path(seq), weights_only=False)
+
+    def values(self):
+        for seq in self._keys:
+            yield torch.load(self._path(seq), weights_only=False)
+
+    def __len__(self) -> int:
+        return len(self._keys)
+
+
+def _build_frame_cache(image_loader, gaussian_cache, n_views, use_normals, use_depth,
+                       cache_dir: Path | None = None):
+    """Precompute per-sequence frame data (cameras / GT / normals / depth).
+
+    When cache_dir is provided frames are saved to disk one sequence at a time
+    so memory stays bounded regardless of dataset size.
+    """
     seq_names = list(image_loader.dataset.sequence_names())
     image_loader.batch_sampler._batches = [
         b[:: max(1, len(b) // n_views)][:n_views]
@@ -291,7 +332,9 @@ def _build_frame_cache(image_loader, gaussian_cache, n_views, use_normals, use_d
         if seq in gaussian_cache
     ]
     _cpu = torch.device("cpu")
-    frame_cache: dict[str, list[dict]] = {}
+    frame_cache: dict[str, list[dict]] | DiskFrameCache = (
+        DiskFrameCache(cache_dir) if cache_dir is not None else {}
+    )
     for _batch in image_loader:
         _seq = _seq_name(_batch)
         _frames = []
@@ -311,7 +354,10 @@ def _build_frame_cache(image_loader, gaussian_cache, n_views, use_normals, use_d
                 _fd["v_depth"]      = _fr["depth_map"].float() * _dsa
                 _fd["v_depth_mask"] = (_fr["depth_mask"] > 0.5).float()
             _frames.append(_fd)
-        frame_cache[_seq] = _frames
+        if isinstance(frame_cache, DiskFrameCache):
+            frame_cache.save(_seq, _frames)
+        else:
+            frame_cache[_seq] = _frames
     return frame_cache
 
 
@@ -373,7 +419,7 @@ def main():
         num_workers=cfg.data.num_workers,
         image_height=cfg.data.image_height,
         image_width=cfg.data.image_width,
-        load_masks=True,
+        load_masks=cfg.data.load_masks,
         load_depths=use_normals or use_depth,
         load_gaussian_splats=True,
         pick_sequences=list(cfg.data.pick_sequences),
@@ -397,10 +443,12 @@ def main():
     optimizer = _build_optimizer(model.parameters(), cfg.train)
     print(f"Model: {model.__class__.__name__}  |  params: {sum(p.numel() for p in model.parameters()):,}")
 
-    # ── phase 2/3: precompute frame data cache (CPU) ─────────────────────────
-    print("Precomputing frame data cache...")
+    # ── phase 2/3: precompute frame data cache (CPU) ──────────────────────────
+    _frame_cache_dir = output_dir / "frame_cache"
+    print(f"Precomputing frame data cache (disk-backed → {_frame_cache_dir})...")
     frame_cache = _build_frame_cache(
-        dm.image_only_loader(), gaussian_cache, n_views, use_normals, use_depth)
+        dm.image_only_loader(), gaussian_cache, n_views, use_normals, use_depth,
+        cache_dir=_frame_cache_dir)
     n_cached = sum(len(v) for v in frame_cache.values())
     print(f"Frame cache: {n_cached} frames across {len(frame_cache)} sequences.\n")
 
@@ -414,7 +462,8 @@ def main():
             output_type, num_val_seqs)
         val_frame_cache = _build_frame_cache(
             dm.image_only_loader(subsets=("val",), shuffle=False),
-            val_gaussian_cache, n_views, use_normals, use_depth)
+            val_gaussian_cache, n_views, use_normals, use_depth,
+            cache_dir=output_dir / "frame_cache_val")
         n_val = sum(len(v) for v in val_frame_cache.values())
         if val_frame_cache:
             print(f"Validation cache: {n_val} frames across {len(val_frame_cache)} sequences.\n")
@@ -452,7 +501,13 @@ def main():
 
             for seq, cached_frames in frame_cache.items():
                 splats_cpu = gaussian_cache[seq]
-                T          = len(cached_frames)
+                n_step = cfg.train.num_views_per_step
+                if n_step > 0 and n_step < len(cached_frames):
+                    idxs = torch.randperm(len(cached_frames))[:n_step].tolist()
+                    step_frames = [cached_frames[i] for i in idxs]
+                else:
+                    step_frames = cached_frames
+                T = len(step_frames)
 
                 optimizer.zero_grad(set_to_none=True)
 
@@ -481,7 +536,7 @@ def main():
 
                 _sync(device)
                 _t0 = time.perf_counter()
-                for fd in cached_frames:
+                for fd in step_frames:
                     frame_loss, photo_loss, normal_loss, depth_loss = _frame_losses(
                         recon_d, fd, cfg.train.loss, output_type,
                         use_normals, use_depth, device,

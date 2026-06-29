@@ -73,45 +73,46 @@ class MiniPointNet2DGSNetworkPP(nn.Module):
     """MiniPointNet2DGS with a dual-branch decoder.
 
     The encoder is identical to MiniPointNet2DGSNetwork (per-point MLP +
-    global max-pool → 1024). The decoder is split into two independent MLPs:
+    global max-pool → hidden_dim). The decoder is split into two independent MLPs:
     one for geometry (means / scales / quats) and one for appearance (sh0 /
     opacity), so the model can specialise each branch without interference.
     Both output layers are zero-initialised so the module is the identity at
     step 0.
     """
 
-    def __init__(self, splat_dim: int = 13, encoder_in_dim: int | None = None):
+    def __init__(self, splat_dim: int = 13, encoder_in_dim: int | None = None, hidden_dim: int = 1024):
         super().__init__()
         self.splat_dim = splat_dim
         enc_in = splat_dim if encoder_in_dim is None else encoder_in_dim
         self.encoder_in_dim = enc_in
+        h = hidden_dim
 
         self.point_encoder = nn.Sequential(
-            nn.Linear(enc_in, 64),  nn.LayerNorm(64),  nn.ReLU(),
-            nn.Linear(64,  256),    nn.LayerNorm(256),  nn.ReLU(),
-            nn.Linear(256, 512),    nn.LayerNorm(512),  nn.ReLU(),
-            nn.Linear(512, 1024),
+            nn.Linear(enc_in, h // 16), nn.LayerNorm(h // 16), nn.ReLU(),
+            nn.Linear(h // 16, h // 4), nn.LayerNorm(h // 4),  nn.ReLU(),
+            nn.Linear(h // 4,  h // 2), nn.LayerNorm(h // 2),  nn.ReLU(),
+            nn.Linear(h // 2,  h),
         )
 
         # geometry branch: means(3) + scales2d(2) + quats(4) = 9 dims
-        geom_out = nn.Linear(128, 9)
+        geom_out = nn.Linear(h // 8, 9)
         nn.init.zeros_(geom_out.weight)
         nn.init.zeros_(geom_out.bias)
         self.geom_decoder = nn.Sequential(
-            nn.Linear(1024 + splat_dim, 512), nn.LayerNorm(512), nn.ReLU(),
-            nn.Linear(512, 256),              nn.LayerNorm(256), nn.ReLU(),
-            nn.Linear(256, 128),                                 nn.ReLU(),
+            nn.Linear(h + splat_dim, h // 2), nn.LayerNorm(h // 2), nn.ReLU(),
+            nn.Linear(h // 2, h // 4),        nn.LayerNorm(h // 4), nn.ReLU(),
+            nn.Linear(h // 4, h // 8),                               nn.ReLU(),
             geom_out,
         )
 
         # appearance branch: sh0(3) + opacity(1) = 4 dims
-        appear_out = nn.Linear(128, 4)
+        appear_out = nn.Linear(h // 8, 4)
         nn.init.zeros_(appear_out.weight)
         nn.init.zeros_(appear_out.bias)
         self.appear_decoder = nn.Sequential(
-            nn.Linear(1024 + splat_dim, 512), nn.LayerNorm(512), nn.ReLU(),
-            nn.Linear(512, 256),              nn.LayerNorm(256), nn.ReLU(),
-            nn.Linear(256, 128),                                 nn.ReLU(),
+            nn.Linear(h + splat_dim, h // 2), nn.LayerNorm(h // 2), nn.ReLU(),
+            nn.Linear(h // 2, h // 4),        nn.LayerNorm(h // 4), nn.ReLU(),
+            nn.Linear(h // 4, h // 8),                               nn.ReLU(),
             appear_out,
         )
 
@@ -152,26 +153,27 @@ class MiniPointNet2DGSNetworkPP(nn.Module):
 
 
 class MiniPointNet2DGSNetwork(nn.Module):
-    def __init__(self, splat_dim: int = 13, encoder_in_dim: int | None = None):
+    def __init__(self, splat_dim: int = 13, encoder_in_dim: int | None = None, hidden_dim: int = 1024):
         super().__init__()
         self.splat_dim = splat_dim
         enc_in = splat_dim if encoder_in_dim is None else encoder_in_dim
         self.encoder_in_dim = enc_in
+        h = hidden_dim
 
         self.point_encoder = nn.Sequential(
-            nn.Linear(enc_in, 64), nn.LayerNorm(64),  nn.ReLU(),
-            nn.Linear(64, 256),  nn.LayerNorm(256),   nn.ReLU(),
-            nn.Linear(256, 512), nn.LayerNorm(512),   nn.ReLU(),
-            nn.Linear(512, 1024),
+            nn.Linear(enc_in, h // 16), nn.LayerNorm(h // 16), nn.ReLU(),
+            nn.Linear(h // 16, h // 4), nn.LayerNorm(h // 4),  nn.ReLU(),
+            nn.Linear(h // 4,  h // 2), nn.LayerNorm(h // 2),  nn.ReLU(),
+            nn.Linear(h // 2,  h),
         )
 
-        out_layer = nn.Linear(128, splat_dim)
+        out_layer = nn.Linear(h // 8, splat_dim)
         nn.init.zeros_(out_layer.weight)
         nn.init.zeros_(out_layer.bias)
         self.decoder = nn.Sequential(
-            nn.Linear(1024 + splat_dim, 512), nn.LayerNorm(512), nn.ReLU(),
-            nn.Linear(512, 256),              nn.LayerNorm(256), nn.ReLU(),
-            nn.Linear(256, 128),                                 nn.ReLU(),
+            nn.Linear(h + splat_dim, h // 2), nn.LayerNorm(h // 2), nn.ReLU(),
+            nn.Linear(h // 2, h // 4),        nn.LayerNorm(h // 4), nn.ReLU(),
+            nn.Linear(h // 4, h // 8),                               nn.ReLU(),
             out_layer,
         )
 

@@ -85,3 +85,4 @@ wandb/
 checkpoints/
 runs/
 2dgs_cache
+*.csv
