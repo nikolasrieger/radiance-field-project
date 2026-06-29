@@ -1,0 +1,40 @@
+run:
+  name: minipointnetpp_normal_sweep_0.2
+  wandb_mode: online
+
+data:
+  dataset_root: /mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_big
+  subset_lists_filename: /home/nrieger/radiance-field-project/set_lists_big_baby.sqlite
+  num_supervision_views: 50
+  num_workers: 4
+  num_sequences: 10
+  num_val_sequences: 10
+  num_val_views: 10
+  max_splats: 260000
+  max_points: 260000
+  load_masks: true
+  pick_sequences: []
+
+model:
+  model_type: minipointnetpp
+  output_type: gs2d
+  hidden_dim: 1024
+
+train:
+  epochs: 1000
+  lr: 1e-4
+  optimizer: adamw
+  weight_decay: 0.01
+  grad_clip: 1.0
+  log_every: 20
+  max_log_sequences: 5
+  ckpt_every: 100
+  num_views_per_step: 4
+  loss:
+    type: l1
+    normal_loss_type: cosine
+    normal_region: foreground
+    recon_region: foreground
+    lambda_ssim: 0.0
+    lambda_normal: 0.2
+    lambda_depth: 0.0
