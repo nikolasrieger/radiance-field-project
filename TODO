@@ -2,7 +2,7 @@
 - [x] do some ablation runs - maybe Nikolas
 - [x] feed features into encoder as well - Leo
 - [ ] test more local tokens for merging instead of global tokens - Nikolas
-- [ ] have another look at decoder (e.g. Can3Tok, DA3) - Leo
+- [x] have another look at decoder (e.g. Can3Tok, DA3) - Leo
 - [ ] pointnet++ training stability check - maybe Leo 
 - [x] 3D drag evaluation - Nikolas
 - [x] improve training efficiency - Nikolas (70s -> 17s per epoch)
@@ -10,4 +10,5 @@
 - [x] add a linprim version - maybe Nikolas (there is some error, check later)
 - [ ] linprim variant needs too much memory (-> OOM)
 - [ ] add LR scheduler
-- [ ] run the metrics on the different models
+- [x] run the metrics on the different models
+- [ ] scheduler for trainings

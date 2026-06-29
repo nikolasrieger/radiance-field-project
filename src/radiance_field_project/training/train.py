@@ -152,6 +152,10 @@ def _photometric_loss(rendered, gt_image, fg_mask, loss_cfg):
     if loss_cfg.type == LossType.l1:
         return reconstruction_loss_l1(rendered, gt_image, mask=mask,
                                       lambda_ssim=loss_cfg.lambda_ssim)
+    if loss_cfg.type == LossType.l1_masked:
+        # Always mask the L1 term to the foreground, regardless of recon_region.
+        return reconstruction_loss_l1(rendered, gt_image, mask=fg_mask,
+                                      lambda_ssim=loss_cfg.lambda_ssim)
     if mask is not None:
         binary = (mask > 0.5).float()
         return ((rendered - gt_image).abs() * binary).sum() / binary.sum().clamp(min=1.0)
