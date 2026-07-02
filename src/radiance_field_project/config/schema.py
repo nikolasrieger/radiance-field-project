@@ -48,6 +48,11 @@ class ModelType(Enum):
     minipointnetpp = "minipointnetpp"
 
 
+class TokenSampling(Enum):
+    fps = "fps"
+    random = "random"
+
+
 @dataclass
 class RunConfig:
     name: str = "unnamed"
@@ -107,6 +112,18 @@ class ModelConfig:
     # Split the FP-decoded features into a geometry branch (means/scale/quat)
     # and an appearance branch (sh0/opacity). Only meaningful with decoder_type="fp".
     dual_branch: bool = False
+    # Number of encoder tokens subsampled from the input cloud before the SA
+    # stack. The SA stage sizes scale with it (npoint = tokens/2, tokens/8).
+    # Only used when model_type=pointnet2.
+    num_tokens: int = 1024
+    # How encoder tokens are picked: "fps" (farthest point sampling, slower but
+    # uniform coverage) or "random" (uniform random, cheap at large budgets).
+    token_sampling: TokenSampling = TokenSampling.fps
+    # Concatenate the global SA feature onto every per-point FP feature and
+    # fuse back to the head width before the prediction head, combining the
+    # minipointnet-style global conditioning with the FP local features.
+    # Requires decoder_type="fp".
+    global_skip: bool = False
     init_scale: float = 0.01
     init_opacity: float = 0.1
     # Hidden dimension for minipointnet/minipointnetpp. Scales all layer widths
