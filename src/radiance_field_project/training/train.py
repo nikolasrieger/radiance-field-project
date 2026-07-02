@@ -30,6 +30,7 @@ from radiance_field_project.data.datamodule import UCO3DDataModule
 from radiance_field_project.models.model_factory import build_model
 from radiance_field_project.utils.gaussian_ops import to_2dgs_canonical
 from radiance_field_project.utils.losses import reconstruction_loss, reconstruction_loss_l1
+from radiance_field_project.utils import metrics
 from radiance_field_project.utils.rendering import get_camera_params, render_view, world_normals_to_camera
 from radiance_field_project.utils.splat_visualizer import SplatRenderVisualizer
 
@@ -162,7 +163,8 @@ def _photometric_loss(rendered, gt_image, fg_mask, loss_cfg):
     return (rendered - gt_image).abs().mean()
 
 
-def _frame_losses(recon, fd, loss_cfg, output_type, use_normals, use_depth, device):
+def _frame_losses(recon, fd, loss_cfg, output_type, use_normals, use_depth, device,
+                  return_extras=False):
     """Per-frame losses for ``recon`` against cached frame data ``fd``.
 
     Returns ``(frame_loss, photo_loss, normal_loss, depth_loss)`` as tensors;
@@ -170,6 +172,12 @@ def _frame_losses(recon, fd, loss_cfg, output_type, use_normals, use_depth, devi
     Shared by the training step and validation so both measure exactly the same
     quantity. ``recon`` is whatever splats object to render (the detached
     ``recon_d`` during training, the live ``recon`` during validation).
+
+    When ``return_extras=True``, a fifth element — a dict with the rendered
+    RGB (``"rendered"``), and, when enabled, the camera-frame rendered normals
+    (``"normals_cam"``) and their loss mask (``"normal_mask"``), and the
+    rendered depth (``"rendered_depth"``) — is also returned. This lets
+    validation compute image/geometry quality metrics without re-rendering.
     """
     v_mats = fd["v_mats"].to(device, non_blocking=True)
     v_K    = fd["v_K"].to(device, non_blocking=True)
@@ -223,15 +231,36 @@ def _frame_losses(recon, fd, loss_cfg, output_type, use_normals, use_depth, devi
     frame_loss = (photo_loss
                   + loss_cfg.lambda_normal * normal_loss
                   + loss_cfg.lambda_depth * depth_loss)
-    return frame_loss, photo_loss, normal_loss, depth_loss
+    if not return_extras:
+        return frame_loss, photo_loss, normal_loss, depth_loss
+
+    extras = {"rendered": rendered}
+    if use_normals:
+        extras["normals_cam"]  = normals_cam
+        extras["normal_mask"] = normal_mask
+    if use_depth:
+        extras["rendered_depth"] = rendered_depth
+    return frame_loss, photo_loss, normal_loss, depth_loss, extras
+
+
+_DEPTH_ERR_KEYS = ("l1_abs", "l2_abs", "l1_rel", "l2_rel")
 
 
 @torch.no_grad()
 def _validate(model, gaussian_cache, frame_cache, loss_cfg, output_type,
               use_normals, use_depth, max_points, device):
-    """Average validation loss over the held-out sequences (no gradients)."""
+    """Average validation loss/metrics over the held-out sequences (no gradients).
+
+    Besides the training-objective losses, also computes standard
+    image/geometry quality metrics (PSNR, SSIM, LPIPS, and — when enabled —
+    depth L1/L2 relative/absolute error and normal angular error) for
+    reporting to wandb.
+    """
     model.eval()
     tot_loss = tot_photo = tot_normal = tot_depth = 0.0
+    tot_psnr = tot_ssim = tot_lpips = 0.0
+    tot_normal_err = 0.0
+    tot_depth_err  = {k: 0.0 for k in _DEPTH_ERR_KEYS}
     n_seq = 0
     for seq, splats_cpu in gaussian_cache.items():
         frames = frame_cache.get(seq)
@@ -241,25 +270,61 @@ def _validate(model, gaussian_cache, frame_cache, loss_cfg, output_type,
         splats = _subsample(_to_device(splats_cpu, device), max_points)
         recon  = model.reconstruct_splats(splats)
         s_loss = s_photo = s_normal = s_depth = 0.0
+        s_psnr = s_ssim = s_lpips = s_normal_err = 0.0
+        s_depth_err = {k: 0.0 for k in _DEPTH_ERR_KEYS}
         for fd in frames:
-            fl, pl, nl, dl = _frame_losses(
-                recon, fd, loss_cfg, output_type, use_normals, use_depth, device)
+            fl, pl, nl, dl, extras = _frame_losses(
+                recon, fd, loss_cfg, output_type, use_normals, use_depth, device,
+                return_extras=True)
             s_loss   += fl.item() / T
             s_photo  += pl.item() / T
             s_normal += nl.item() / T
             s_depth  += dl.item() / T
+
+            rendered = extras["rendered"].clamp(0.0, 1.0)
+            v_gt     = fd["v_gt"].to(device, non_blocking=True).clamp(0.0, 1.0)
+            s_psnr  += metrics.psnr(rendered, v_gt).item() / T
+            s_ssim  += metrics.ssim(rendered, v_gt).item() / T
+            s_lpips += metrics.lpips_distance(rendered, v_gt, device).item() / T
+
+            if use_depth:
+                v_depth      = fd["v_depth"].to(device, non_blocking=True)
+                v_depth_mask = fd["v_depth_mask"].to(device, non_blocking=True)
+                derr = metrics.depth_errors(extras["rendered_depth"], v_depth, v_depth_mask)
+                for k in _DEPTH_ERR_KEYS:
+                    s_depth_err[k] += derr[k].item() / T
+            if use_normals:
+                v_gt_normals = fd["v_gt_normals"].to(device, non_blocking=True)
+                s_normal_err += metrics.normal_angular_error(
+                    extras["normals_cam"], v_gt_normals, extras["normal_mask"]).item() / T
+
         tot_loss   += s_loss
         tot_photo  += s_photo
         tot_normal += s_normal
         tot_depth  += s_depth
+        tot_psnr   += s_psnr
+        tot_ssim   += s_ssim
+        tot_lpips  += s_lpips
+        tot_normal_err += s_normal_err
+        for k in _DEPTH_ERR_KEYS:
+            tot_depth_err[k] += s_depth_err[k]
         n_seq += 1
     n_seq = max(n_seq, 1)
-    return {
+    result = {
         "loss":   tot_loss   / n_seq,
         "photo":  tot_photo  / n_seq,
         "normal": tot_normal / n_seq,
         "depth":  tot_depth  / n_seq,
+        "psnr":   tot_psnr   / n_seq,
+        "ssim":   tot_ssim   / n_seq,
+        "lpips":  tot_lpips  / n_seq,
     }
+    if use_normals:
+        result["normal_err"] = tot_normal_err / n_seq
+    if use_depth:
+        for k in _DEPTH_ERR_KEYS:
+            result[f"depth_{k}"] = tot_depth_err[k] / n_seq
+    return result
 
 
 def _build_gaussian_cache(splat_loader, output_type, num_sequences, verbose=False):
@@ -499,6 +564,8 @@ def main():
             total_t_forward = total_t_render = total_t_backward = 0.0
             n_steps = 0
             t_epoch_start = time.perf_counter()
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
 
             for seq, cached_frames in frame_cache.items():
                 splats_cpu = gaussian_cache[seq]
@@ -612,11 +679,23 @@ def main():
                     wandb_log["val/normal_loss"] = val_metrics["normal"]
                 if use_depth:
                     wandb_log["val/depth_loss"] = val_metrics["depth"]
+                wandb_log["val/psnr"]  = val_metrics["psnr"]
+                wandb_log["val/ssim"]  = val_metrics["ssim"]
+                wandb_log["val/lpips"] = val_metrics["lpips"]
+                if use_normals:
+                    wandb_log["val/normal_err_deg"] = val_metrics["normal_err"]
+                if use_depth:
+                    for k in _DEPTH_ERR_KEYS:
+                        wandb_log[f"val/depth_{k}"] = val_metrics[f"depth_{k}"]
+
+            if device.type == "cuda":
+                wandb_log["mem/peak_gpu_gb"] = torch.cuda.max_memory_allocated(device) / 1024 ** 3
 
             if epoch % cfg.train.log_every == 0:
                 parts = [f"Epoch {epoch:05d}/{cfg.train.epochs}", f"Loss={avg:.6f}"]
                 if val_metrics is not None:
                     parts.append(f"ValLoss={val_metrics['loss']:.6f}")
+                    parts.append(f"ValPSNR={val_metrics['psnr']:.2f}")
                 if use_normals:
                     parts += [f"Photo={avg_photo:.6f}", f"Normal={avg_normal:.6f}"]
                 if use_depth:

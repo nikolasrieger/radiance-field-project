@@ -9,6 +9,7 @@ dependencies = [
     "gsplat>=1.5.3",
     "h5py>=3.16.0",
     "imageio>=2.37.3",
+    "lpips>=0.1.4",
     "matplotlib>=3.10.9",
     "omegaconf>=2.3.0",
     "opencv-python-headless>=4.13.0.92",

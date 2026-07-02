@@ -1,0 +1,45 @@
+run:
+  name: pointnet2_l1_l1normal
+  wandb_mode: online
+
+data:
+  dataset_root: /mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_big
+  subset_lists_filename: /home/nrieger/radiance-field-project/set_lists_big_baby.sqlite
+  num_supervision_views: 50
+  num_workers: 4
+  num_sequences: 10
+  num_val_sequences: 10
+  num_val_views: 10
+  max_splats: 260000
+  max_points: 260000
+  load_masks: true
+  pick_sequences: []
+
+model:
+  model_type: pointnet2
+  output_type: gs2d
+  encoder: [128, 256, 1024]
+  decoder: [512, 256, 128]
+  decoder_type: fp
+  dual_branch: true
+  init_scale: 0.01
+  init_opacity: 0.1
+
+train:
+  epochs: 1000
+  lr: 1e-4
+  optimizer: adamw
+  weight_decay: 0.01
+  grad_clip: 1.0
+  log_every: 20
+  max_log_sequences: 5
+  ckpt_every: 100
+  num_views_per_step: 4
+  loss:
+    type: l1
+    normal_loss_type: l1
+    normal_region: foreground
+    recon_region: foreground
+    lambda_ssim: 0.0
+    lambda_normal: 0.05
+    lambda_depth: 0.0

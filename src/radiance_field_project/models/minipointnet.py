@@ -190,26 +190,12 @@ class MiniPointNet2DGSNetwork(nn.Module):
         opacities: torch.Tensor,
     ) -> dict:
         N = means.shape[0]
-        _dbg = means.is_cuda
-        if _dbg:
-            _a = torch.cuda.memory_allocated(means.device) / 1024**3
-            _r = torch.cuda.memory_reserved(means.device) / 1024**3
-            print(f"  [MODEL] reconstruct_splats_2dgs N={N}  alloc={_a:.2f}GB  reserv={_r:.2f}GB", flush=True)
         flat  = torch.cat([means, sh0, scales2d, quats, opacities.unsqueeze(-1)], dim=-1)
         enc_input = flat[..., :self.encoder_in_dim]
-        if _dbg:
-            _a = torch.cuda.memory_allocated(means.device) / 1024**3
-            print(f"  [MODEL] after flat cat  alloc={_a:.2f}GB  enc_input shape={enc_input.shape}", flush=True)
         global_feat = self.encode(enc_input.unsqueeze(0)).expand(N, -1)  # (N, 1024)
-        if _dbg:
-            _a = torch.cuda.memory_allocated(means.device) / 1024**3
-            print(f"  [MODEL] after encode  alloc={_a:.2f}GB  global_feat shape={global_feat.shape}", flush=True)
-
+        
         delta = self.decoder(torch.cat([global_feat, flat], dim=-1))  # (N, splat_dim)
-        if _dbg:
-            _a = torch.cuda.memory_allocated(means.device) / 1024**3
-            print(f"  [MODEL] after decode  alloc={_a:.2f}GB", flush=True)
-
+        
         return dict(
             means     = means     + delta[:, 0:3],
             sh0       = sh0       + delta[:, 3:6],
