@@ -307,14 +307,21 @@ class PointNetFeaturePropagation(nn.Module):
         if S == 1:
             interpolated_points = points2.repeat(1, N, 1)
         else:
-            dists = square_distance(xyz1, xyz2)
-            dists, idx = dists.sort(dim=-1)
-            dists, idx = dists[:, :, :3], idx[:, :, :3]  # [B, N, 3]
+            # Chunk the 3-NN interpolation over the query points: the full
+            # [B, N, S] distance matrix is O(N*S) memory (4 GB at N=260k,
+            # S=4096), which OOMs long before the rest of the network does.
+            chunk = max(1, 2 ** 27 // max(S, 1))   # ~0.5 GB fp32 per chunk
+            chunks = []
+            for s0 in range(0, N, chunk):
+                q = xyz1[:, s0 : s0 + chunk]
+                dists, idx = square_distance(q, xyz2).topk(3, dim=-1, largest=False)
 
-            dist_recip = 1.0 / (dists + 1e-8)
-            norm = torch.sum(dist_recip, dim=2, keepdim=True)
-            weight = dist_recip / norm
-            interpolated_points = torch.sum(index_points(points2, idx) * weight.view(B, N, 3, 1), dim=2)
+                dist_recip = 1.0 / (dists + 1e-8)
+                norm = torch.sum(dist_recip, dim=2, keepdim=True)
+                weight = dist_recip / norm
+                chunks.append(torch.sum(
+                    index_points(points2, idx) * weight.unsqueeze(-1), dim=2))
+            interpolated_points = torch.cat(chunks, dim=1)
 
         if points1 is not None:
             points1 = points1.permute(0, 2, 1)

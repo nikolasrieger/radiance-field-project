@@ -225,19 +225,15 @@ class SplatRefiner(nn.Module):
         "linprim": (12, GaussianHeadLinPrim),
     }
 
-    # Spatial subsampling params for each SA stage (the final stage is
-    # always group_all=True and ignores these).
-    _SA_SPATIAL = [
-        dict(npoint=512, radius=0.2, nsample=32),
-        dict(npoint=128, radius=0.4, nsample=64),
-    ]
-
     def __init__(self,
                  output_format: str = "3dgs",
                  encoder=(128, 256, 1024),
                  decoder=(512, 256, 128),
                  decoder_type: str = "trunk",
                  dual_branch: bool = False,
+                 num_tokens: int = 1024,
+                 token_sampling: str = "fps",
+                 global_skip: bool = False,
                  normal_channel: bool = False,
                  init_scale: float = 0.01,
                  init_opacity: float = 0.1,
@@ -253,9 +249,18 @@ class SplatRefiner(nn.Module):
                 f"decoder_type must be 'trunk' or 'fp', got {decoder_type!r}")
         if dual_branch and decoder_type != "fp":
             raise ValueError("dual_branch=True requires decoder_type='fp'")
+        if global_skip and decoder_type != "fp":
+            raise ValueError("global_skip=True requires decoder_type='fp' "
+                             "(the trunk decoder already broadcasts the global feature)")
+        if token_sampling not in ("fps", "random"):
+            raise ValueError(
+                f"token_sampling must be 'fps' or 'random', got {token_sampling!r}")
         self.output_format = output_format
         self.decoder_type = decoder_type
         self.dual_branch = dual_branch
+        self.num_tokens = num_tokens
+        self.token_sampling = token_sampling
+        self.global_skip = global_skip
         splat_dim, HeadCls = self._FORMATS[output_format]
 
         encoder = list(encoder)
@@ -283,6 +288,14 @@ class SplatRefiner(nn.Module):
         else:
             in_channel = 3 + self.feat_dim + (3 if normal_channel else 0)
 
+        # Spatial subsampling params for each SA stage (the final stage is
+        # always group_all=True and ignores these). Stage sizes scale with the
+        # token budget; the defaults reproduce the original 512/128 at 1024.
+        sa_spatial = [
+            dict(npoint=max(num_tokens // 2, 1), radius=0.2, nsample=32),
+            dict(npoint=max(num_tokens // 8, 1), radius=0.4, nsample=64),
+        ]
+
         # Build SA stack — each stage's internal MLP expands prev→prev→out.
         sa_modules = []
         prev_out = in_channel
@@ -291,7 +304,7 @@ class SplatRefiner(nn.Module):
             spatial = (
                 dict(npoint=None, radius=None, nsample=None, group_all=True)
                 if is_last
-                else {**self._SA_SPATIAL[i], "group_all": False}
+                else {**sa_spatial[i], "group_all": False}
             )
             # SA input channel: raw `in_channel` for the first stage; for
             # later stages PointNet++ concatenates xyz, so prev_out + 3.
@@ -347,6 +360,15 @@ class SplatRefiner(nn.Module):
             # fp0 upsamples to the full N input cloud; its skip is the raw
             # per-point splat vector (the DPT skip-to-input-resolution analog).
             self.fp0 = PointNetFeaturePropagation(splat_dim + d2, [d2, head_in])
+            if global_skip:
+                # Fuse (per-point FP feature ⊕ global feature) back to the head
+                # width, giving every point direct access to the un-diluted
+                # global summary alongside its multi-scale local features.
+                self.global_fuse = nn.Sequential(
+                    nn.Linear(head_in + global_feat_dim, head_in),
+                    nn.LayerNorm(head_in),
+                    nn.ReLU(),
+                )
             if dual_branch:
                 self.geom_branch = self._branch_mlp(head_in)
                 self.appear_branch = self._branch_mlp(head_in)
@@ -389,7 +411,15 @@ class SplatRefiner(nn.Module):
         scale = means_centered.norm(dim=-1, keepdim=True).max(dim=1, keepdim=True).values
         means_normed = means_centered / (scale + 1e-8)
 
-        idx = farthest_point_sample(means_normed, 1024)
+        n_tok = min(self.num_tokens, means_b.shape[1])
+        if self.token_sampling == "random":
+            # Uniform random tokens: O(N) vs FPS's O(n_tok * N) sequential
+            # loop, which makes large token budgets affordable.
+            idx = torch.rand(
+                means_b.shape[0], means_b.shape[1], device=means_b.device
+            ).argsort(dim=-1)[:, :n_tok]
+        else:
+            idx = farthest_point_sample(means_normed, n_tok)
         pts = index_points(means_normed, idx)
 
         xyz_t = pts.permute(0, 2, 1)
@@ -471,6 +501,9 @@ class SplatRefiner(nn.Module):
             per_point = self.fp0(full_xyz, levels["l0_xyz"],
                                  full_skip, up0)                     # (1, head_in, N)
             feats = per_point.squeeze(0).permute(1, 0)               # (N, head_in)
+            if self.global_skip:
+                feats = self.global_fuse(
+                    torch.cat([feats, global_feat.expand(N, -1)], dim=-1))
             if self.dual_branch:
                 feat_appear = self.appear_branch(feats)
                 feats = self.geom_branch(feats)

@@ -33,6 +33,11 @@ def build_model(model_config: ModelConfig,
             decoder=list(model_config.decoder),
             decoder_type=model_config.decoder_type,
             dual_branch=model_config.dual_branch,
+            num_tokens=model_config.num_tokens,
+            token_sampling=model_config.token_sampling.value
+                if hasattr(model_config.token_sampling, "value")
+                else str(model_config.token_sampling),
+            global_skip=model_config.global_skip,
             init_scale=model_config.init_scale,
             init_opacity=model_config.init_opacity,
             encoder_in_channel=encoder_in_channel,
