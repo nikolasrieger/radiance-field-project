@@ -7,10 +7,10 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 RUNS=(
-    runs/minipointnet_l1_l1normal
-    runs/minipointnet_l2_cos
-    runs/pointnet2_l1_l1normal
-    runs/pointnet2_l2_cos
+    runs/pointnet2_normal_sweep_0.2_gskip
+    runs/pointnet2_normal_sweep_0.2_gskip_tok4096
+    #runs/pointnet2_l1_l1normal
+    #runs/pointnet2_l2_cos
 )
 
 for run in "${RUNS[@]}"; do

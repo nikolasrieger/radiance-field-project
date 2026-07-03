@@ -21,11 +21,12 @@ import torch.nn.functional as F
 import wandb
 from omegaconf import OmegaConf
 from torch.optim import Adam, AdamW
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from uco3d import GaussianSplats
 from uco3d.dataset_utils.data_types import Cameras
 
 from radiance_field_project.config import parse_cli
-from radiance_field_project.config.schema import LossType, NormalLossType, NormalRegion, Optimizer, OutputType, WandbMode
+from radiance_field_project.config.schema import LossType, NormalLossType, NormalRegion, Optimizer, OutputType, SchedulerType, WandbMode
 from radiance_field_project.data.datamodule import UCO3DDataModule
 from radiance_field_project.models.model_factory import build_model
 from radiance_field_project.utils.gaussian_ops import to_2dgs_canonical
@@ -134,6 +135,21 @@ def _build_optimizer(params, cfg):
     if cfg.optimizer == Optimizer.adam:
         return Adam(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
     raise ValueError(f"Unknown optimizer: {cfg.optimizer}")
+
+
+def _build_scheduler(optimizer, cfg):
+    """Epoch-keyed scheduler. Uses absolute epoch counts (patience, not a
+    fraction of train.epochs), so it stays correct even with epochs set to a
+    very high placeholder value and training stopped manually."""
+    if cfg.scheduler.type == SchedulerType.none:
+        return None
+    if cfg.scheduler.type == SchedulerType.plateau:
+        return ReduceLROnPlateau(
+            optimizer, mode="min", factor=cfg.scheduler.factor,
+            patience=cfg.scheduler.patience, threshold=cfg.scheduler.threshold,
+            min_lr=cfg.scheduler.min_lr,
+        )
+    raise ValueError(f"Unknown scheduler type: {cfg.scheduler.type}")
 
 
 def _depth_loss(rendered_depth: torch.Tensor, gt_depth: torch.Tensor,
@@ -327,22 +343,41 @@ def _validate(model, gaussian_cache, frame_cache, loss_cfg, output_type,
     return result
 
 
-def _build_gaussian_cache(splat_loader, output_type, num_sequences, verbose=False):
-    """Preload per-sequence splats to CPU. ``num_sequences`` caps the count
-    (``None`` = all)."""
+def _build_gaussian_cache(splat_loader, output_type, num_sequences, verbose=False,
+                          cache_dir: Path | None = None, target_shard_size: int = 100):
+    """Preload per-sequence splats. ``num_sequences`` caps the count (``None`` = all).
+
+    When ``cache_dir`` is given, converted splats are written to disk in
+    shards (see ``DiskGaussianCache``) instead of being kept resident in a
+    Python dict, so RAM stays bounded regardless of dataset size.
+    """
     # Splats are per-sequence — only the first frame index is needed.
     splat_loader.batch_sampler._batches = [
         b[:1] for b in splat_loader.batch_sampler._batches
     ]
-    cache: dict[str, GaussianSplats] = {}
+    cache: dict[str, GaussianSplats] | DiskGaussianCache
+    if cache_dir is not None:
+        total = len(splat_loader.batch_sampler._batches)
+        if num_sequences is not None:
+            total = min(total, num_sequences)
+        num_shards = max(1, -(-total // target_shard_size))  # ceil division
+        cache = DiskGaussianCache(cache_dir, num_shards)
+    else:
+        cache = {}
     for batch in splat_loader:
         seq = _seq_name(batch)
         raw = batch["sequence_gaussian_splats"][0]
-        cache[seq] = _cache_splat(raw, output_type)
+        splats = _cache_splat(raw, output_type)
+        if isinstance(cache, DiskGaussianCache):
+            cache.add(seq, splats)
+        else:
+            cache[seq] = splats
         if verbose:
             print(f"  {seq}: {raw.means.shape[0]} points")
         if num_sequences is not None and len(cache) >= num_sequences:
             break
+    if isinstance(cache, DiskGaussianCache):
+        cache.finalize()
     return cache
 
 
@@ -381,6 +416,60 @@ class DiskFrameCache:
 
     def __len__(self) -> int:
         return len(self._keys)
+
+
+class DiskGaussianCache:
+    """Gaussian splat cache backed by sharded .pt files on disk.
+
+    Mirrors ``DiskFrameCache``'s role of keeping RAM bounded regardless of
+    dataset size, but shards multiple sequences per file (rather than one
+    file per sequence) since a 6k-sequence run would otherwise create
+    thousands of tiny files. ``items()`` loads and discards one shard at a
+    time, so peak memory during iteration is bounded to a single shard
+    rather than the whole cache.
+    """
+
+    def __init__(self, cache_dir: Path, num_shards: int = 64):
+        self._dir = cache_dir
+        self._dir.mkdir(parents=True, exist_ok=True)
+        self._num_shards = max(1, num_shards)
+        self._index: dict[str, int] = {}
+        self._staged: dict[int, dict[str, GaussianSplats]] = {}
+
+    def _shard_path(self, shard_id: int) -> Path:
+        return self._dir / f"shard_{shard_id:04d}.pt"
+
+    def add(self, seq: str, splats: GaussianSplats) -> None:
+        """Stage a sequence's splats in memory; call ``finalize()`` to flush."""
+        shard_id = len(self._index) % self._num_shards
+        self._index[seq] = shard_id
+        self._staged.setdefault(shard_id, {})[seq] = splats
+
+    def finalize(self) -> None:
+        """Write all staged shards to disk."""
+        for shard_id, buf in self._staged.items():
+            torch.save(buf, self._shard_path(shard_id))
+        self._staged.clear()
+
+    def __getitem__(self, seq: str) -> GaussianSplats:
+        shard = torch.load(self._shard_path(self._index[seq]), weights_only=False)
+        return shard[seq]
+
+    def items(self):
+        for shard_id in sorted(set(self._index.values())):
+            shard = torch.load(self._shard_path(shard_id), weights_only=False)
+            for seq, splats in shard.items():
+                yield seq, splats
+
+    def values(self):
+        for _, splats in self.items():
+            yield splats
+
+    def __contains__(self, seq: str) -> bool:
+        return seq in self._index
+
+    def __len__(self) -> int:
+        return len(self._index)
 
 
 def _build_frame_cache(image_loader, gaussian_cache, n_views, use_normals, use_depth,
@@ -498,15 +587,17 @@ def main():
     num_val_seqs  = cfg.data.num_val_sequences or None
     n_val_views   = cfg.data.num_val_views or n_views
 
-    print("Preloading Gaussian cache...")
+    _gaussian_cache_dir = output_dir / "gaussian_cache"
+    print(f"Preloading Gaussian cache (disk-backed → {_gaussian_cache_dir})...")
     gaussian_cache = _build_gaussian_cache(
         dm.splat_only_loader(max_splats=max_splats),
-        output_type, num_sequences, verbose=True)
+        output_type, num_sequences, verbose=True, cache_dir=_gaussian_cache_dir)
     print(f"Cached {len(gaussian_cache)} sequences.\n")
 
     # ── model & optimizer ─────────────────────────────────────────────────────
     model     = build_model(cfg.model).to(device)
     optimizer = _build_optimizer(model.parameters(), cfg.train)
+    scheduler = _build_scheduler(optimizer, cfg.train)
     print(f"Model: {model.__class__.__name__}  |  params: {sum(p.numel() for p in model.parameters()):,}")
 
     # ── phase 2/3: precompute frame data cache (CPU) ──────────────────────────
@@ -519,13 +610,13 @@ def main():
     print(f"Frame cache: {n_cached} frames across {len(frame_cache)} sequences.\n")
 
     # ── validation caches (held-out "val" split) ─────────────────────────────
-    val_gaussian_cache: dict[str, GaussianSplats] = {}
+    val_gaussian_cache: dict[str, GaussianSplats] | DiskGaussianCache = {}
     val_frame_cache: dict[str, list[dict]] = {}
     if num_val_seqs is not None:
         print(f"Preloading validation cache ({cfg.data.num_val_sequences} sequences)...")
         val_gaussian_cache = _build_gaussian_cache(
             dm.splat_only_loader(max_splats=max_splats, subsets=("val",)),
-            output_type, num_val_seqs)
+            output_type, num_val_seqs, cache_dir=output_dir / "gaussian_cache_val")
         val_frame_cache = _build_frame_cache(
             dm.image_only_loader(subsets=("val",), shuffle=False),
             val_gaussian_cache, n_val_views, use_normals, use_depth,
@@ -567,8 +658,13 @@ def main():
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
 
-            for seq, cached_frames in frame_cache.items():
-                splats_cpu = gaussian_cache[seq]
+            # Driven by gaussian_cache (not frame_cache) so a disk-backed,
+            # sharded cache is read shard-by-shard rather than one random
+            # sequence at a time — see DiskGaussianCache.
+            for seq, splats_cpu in gaussian_cache.items():
+                cached_frames = frame_cache.get(seq)
+                if not cached_frames:
+                    continue
                 n_step = cfg.train.num_views_per_step
                 if n_step > 0 and n_step < len(cached_frames):
                     idxs = torch.randperm(len(cached_frames))[:n_step].tolist()
@@ -655,8 +751,12 @@ def main():
             avg_t_render   = total_t_render   / n_steps
             avg_t_backward = total_t_backward / n_steps
 
+            if scheduler is not None:
+                scheduler.step(avg)
+
             wandb_log: dict = {
                 "train/loss": avg, "train/photo_loss": avg_photo,
+                "train/lr": optimizer.param_groups[0]["lr"],
                 "time/epoch_s": epoch_time,
                 "time/forward_ms": avg_t_forward * 1e3,
                 "time/render_ms": avg_t_render * 1e3,
@@ -693,6 +793,8 @@ def main():
 
             if epoch % cfg.train.log_every == 0:
                 parts = [f"Epoch {epoch:05d}/{cfg.train.epochs}", f"Loss={avg:.6f}"]
+                if scheduler is not None:
+                    parts.append(f"lr={optimizer.param_groups[0]['lr']:.2e}")
                 if val_metrics is not None:
                     parts.append(f"ValLoss={val_metrics['loss']:.6f}")
                     parts.append(f"ValPSNR={val_metrics['psnr']:.2f}")

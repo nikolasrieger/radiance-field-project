@@ -1,6 +1,9 @@
 """DataLoader construction for uCO3D."""
+import hashlib
+import json
 import torch
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterator, List, Optional, Sequence
 
 from torch.utils.data import DataLoader, Sampler
@@ -8,6 +11,19 @@ from uco3d import UCO3DDataset
 
 from radiance_field_project.data.collate import uco3d_collate
 from radiance_field_project.data.dataset import make_uco3d_dataset
+
+_MANIFEST_CACHE_DIR = Path.home() / ".cache" / "radiance_field_project" / "splat_manifests"
+
+
+def _manifest_path(dataset_root: str) -> Path:
+    """Per-dataset-root sidecar file caching sequence -> Gaussian point count.
+
+    Keyed by a hash of ``dataset_root`` (rather than living inside it) so it
+    works even when the dataset directory is read-only, and is shared across
+    every subset/pick_sequences/run that points at the same data.
+    """
+    key = hashlib.sha1(dataset_root.encode()).hexdigest()[:16]
+    return _MANIFEST_CACHE_DIR / f"{key}.json"
 
 
 class SequenceBatchSampler(Sampler[List[int]]):
@@ -26,15 +42,45 @@ class SequenceBatchSampler(Sampler[List[int]]):
     ) -> None:
         self._batches: List[List[int]] = []
         skipped = 0
+
+        # `max_splats` filtering needs each sequence's point count, which
+        # otherwise means fully loading every sequence's splats just to read
+        # `.means.shape[0]`. Cache counts to disk so repeat runs against the
+        # same dataset_root skip that load entirely.
+        manifest: dict = {}
+        manifest_file: Optional[Path] = None
+        manifest_dirty = False
+        if max_splats is not None and getattr(dataset, "dataset_root", None):
+            manifest_file = _manifest_path(str(dataset.dataset_root))
+            if manifest_file.exists():
+                try:
+                    manifest = json.loads(manifest_file.read_text())
+                except (json.JSONDecodeError, OSError):
+                    manifest = {}
+
         for seq in dataset.sequence_names():
             indices = list(dataset.sequence_indices_in_order(seq))
             if max_splats is not None:
-                frame = dataset[indices[0]]
-                splats = frame.sequence_gaussian_splats
-                if splats is not None and splats.means.shape[0] >= max_splats:
+                if seq in manifest:
+                    n_points = manifest[seq]
+                else:
+                    frame = dataset[indices[0]]
+                    splats = frame.sequence_gaussian_splats
+                    n_points = splats.means.shape[0] if splats is not None else 0
+                    manifest[seq] = n_points
+                    manifest_dirty = True
+                if n_points >= max_splats:
                     skipped += 1
                     continue
             self._batches.append(indices)
+
+        if manifest_file is not None and manifest_dirty:
+            try:
+                manifest_file.parent.mkdir(parents=True, exist_ok=True)
+                manifest_file.write_text(json.dumps(manifest))
+            except OSError:
+                pass  # manifest caching is a speed-up, not correctness-critical
+
         if max_splats is not None:
             print(f"SequenceBatchSampler: kept {len(self._batches)} sequences, skipped {skipped} with >= {max_splats} splats")
             if not self._batches:

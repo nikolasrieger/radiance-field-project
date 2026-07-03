@@ -1,6 +1,6 @@
 #uv run training --config configs/pointnet2_nd.yaml
-uv run training --config configs/minipointnet_n1.yaml
-uv run training --config configs/minipointnet_fix_scale.yaml
+uv run training --config configs/pointnet2_normal_0.2_gskip.yaml
+uv run training --config configs/pointnet2_normal_0.2_gskip_tok4096.yaml
 #uv run training --config configs/minipointnet_fix_cloud.yaml
 #uv run training --config configs/minipointnet_fix_all.yaml
 #uv run python eval_benchmark.py --run /home/nrieger/radiance-field-project/runs/minipointnet_2dgs_n_full_0.05_l1_maxp_30 --train 4 --vis-dir vis/ 2>&1 | tee minipointnet_2dgs_n_full_0.05_l1_maxp_30.log

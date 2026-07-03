@@ -18,18 +18,24 @@ data:
 model:
   model_type: pointnet2
   output_type: gs2d
-  encoder: [128, 256, 1024]
-  decoder: [512, 256, 128]
+  encoder: [384, 768, 3072]
+  decoder: [1536, 768, 384]
   decoder_type: fp
   dual_branch: true
   init_scale: 0.01
   init_opacity: 0.1
 
 train:
-  epochs: 1000
+  epochs: 100000000
   lr: 1e-4
   optimizer: adamw
   weight_decay: 0.01
+  scheduler:
+    type: plateau
+    factor: 0.5
+    patience: 50
+    threshold: 1e-4
+    min_lr: 1e-6
   grad_clip: 1.0
   log_every: 20
   max_log_sequences: 5

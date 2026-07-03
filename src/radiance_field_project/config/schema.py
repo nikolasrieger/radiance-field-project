@@ -26,6 +26,11 @@ class Optimizer(Enum):
     adam = "adam"
 
 
+class SchedulerType(Enum):
+    none = "none"
+    plateau = "plateau"
+
+
 class LossType(Enum):
     l2_masked = "l2_masked"
     l1_masked = "l1_masked"
@@ -153,11 +158,28 @@ class LossConfig:
 
 
 @dataclass
+class SchedulerConfig:
+    # "none" (constant lr) or "plateau" (ReduceLROnPlateau, keyed on absolute
+    # epoch counts rather than a fraction of train.epochs — safe to pair with
+    # a very high epochs value and check convergence manually now and then).
+    type: SchedulerType = SchedulerType.none
+    # Decay factor applied to lr on each plateau event: lr *= factor.
+    factor: float = 0.5
+    # Number of epochs with no improvement (beyond `threshold`) before decaying.
+    patience: int = 50
+    # Minimum relative improvement in train loss to reset patience.
+    threshold: float = 1e-4
+    # Floor below which lr is never decayed further.
+    min_lr: float = 1e-6
+
+
+@dataclass
 class TrainConfig:
     epochs: int = 1000
     lr: float = 1e-4
     optimizer: Optimizer = Optimizer.adamw
     weight_decay: float = 0.0
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     loss: LossConfig = field(default_factory=LossConfig)
     log_every: int = 10
     # Cap the number of sequences logged as images to wandb per log step.
