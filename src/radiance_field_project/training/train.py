@@ -376,9 +376,12 @@ def _validate(model, gaussian_cache, val_loader, loss_cfg, output_type,
 
             rendered = extras["rendered"].clamp(0.0, 1.0)
             v_gt     = fd["v_gt"].to(device, non_blocking=True).clamp(0.0, 1.0)
-            s_psnr  += metrics.psnr(rendered, v_gt).item() / T
-            s_ssim  += metrics.ssim(rendered, v_gt).item() / T
-            s_lpips += metrics.lpips_distance(rendered, v_gt, device).item() / T
+            metric_mask = None
+            if loss_cfg.recon_region == NormalRegion.foreground:
+                metric_mask = fd["v_mask"].to(device, non_blocking=True)
+            s_psnr  += metrics.psnr(rendered, v_gt, metric_mask).item() / T
+            s_ssim  += metrics.ssim(rendered, v_gt, metric_mask).item() / T
+            s_lpips += metrics.lpips_distance(rendered, v_gt, device, metric_mask).item() / T
 
             if use_depth:
                 v_depth      = fd["v_depth"].to(device, non_blocking=True)

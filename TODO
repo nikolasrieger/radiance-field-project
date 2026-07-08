@@ -13,3 +13,6 @@
 - [x] run the metrics on the different models
 - [ ] scheduler for trainings
 - [ ] test different normal loss hparams, test l1 loss for reconstruction
+- [ ] normalize masked RGB reconstruction losses by mask pixels * channels so masked/unmasked losses stay on comparable scale
+- [ ] normalize foreground normal losses over valid mask pixels instead of the full image so the effective normal weight does not depend on foreground area
+- [ ] split validation reporting for large runs into comparable small-val and broad-val summaries; current 200-sequence validation is much smoother than older 10-sequence runs
