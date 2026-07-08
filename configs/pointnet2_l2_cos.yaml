@@ -4,11 +4,11 @@ run:
 
 data:
   dataset_root: /mnt/hdd/lkuech/repos/radiance-field-project/data/uco3d_data_big
-  subset_lists_filename: /home/nrieger/radiance-field-project/set_lists_big_baby.sqlite
+  subset_lists_filename: /home/nrieger/radiance-field-project/set_lists_big_toys_split.sqlite
   num_supervision_views: 50
   num_workers: 4
-  num_sequences: 10
-  num_val_sequences: 10
+  num_sequences: 0
+  num_val_sequences: 200
   num_val_views: 10
   max_splats: 260000
   max_points: 260000
@@ -37,9 +37,10 @@ train:
     threshold: 1e-4
     min_lr: 1e-6
   grad_clip: 1.0
-  log_every: 20
+  log_every: 2
+  val_every: 1
   max_log_sequences: 5
-  ckpt_every: 100
+  ckpt_every: 1
   num_views_per_step: 4
   loss:
     type: l2_masked

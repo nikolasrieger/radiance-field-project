@@ -41,6 +41,7 @@ class SequenceBatchSampler(Sampler[List[int]]):
         max_splats: Optional[int] = None,
     ) -> None:
         self._batches: List[List[int]] = []
+        self._seq_names: List[str] = []
         skipped = 0
 
         # `max_splats` filtering needs each sequence's point count, which
@@ -73,6 +74,7 @@ class SequenceBatchSampler(Sampler[List[int]]):
                     skipped += 1
                     continue
             self._batches.append(indices)
+            self._seq_names.append(seq)
 
         if manifest_file is not None and manifest_dirty:
             try:
