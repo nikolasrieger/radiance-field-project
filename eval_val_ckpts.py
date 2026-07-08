@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 
 import torch
+import torch.nn as nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
@@ -36,6 +37,18 @@ from radiance_field_project.config import load_config
 from radiance_field_project.data.datamodule import UCO3DDataModule
 from radiance_field_project.models.model_factory import build_model
 from radiance_field_project.training.train import _validate, build_val_set
+
+
+class _Passthrough(nn.Module):
+    """Identity 'model': render the input splats with no refinement.
+
+    Used to emit raw-splat baseline rows (2dgs / 3dgs) through the exact same
+    val set + metric code as the trained checkpoints, so they are directly
+    comparable, column for column.
+    """
+
+    def reconstruct_splats(self, splats):
+        return splats
 
 
 def _parse_epochs(spec: str) -> list[int]:
@@ -78,10 +91,21 @@ def main() -> None:
                     help="Output CSV path (default: <run_dir>/val_metrics.csv)")
     ap.add_argument("--device", type=str, default=None,
                     help="Override device (default: config value / cuda)")
+    ap.add_argument("--num-val-sequences", type=int, default=None,
+                    help="Override data.num_val_sequences (e.g. 10 to eval a "
+                         "handful of val scenes). Default: config value.")
+    ap.add_argument("--baseline", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="Also append raw-splat baseline rows (--baseline / "
+                         "--no-baseline). Default: on.")
+    ap.add_argument("--baseline-types", type=str, default="3dgs,2dgs",
+                    help="Representations to baseline (default: 3dgs,2dgs).")
     args = ap.parse_args()
 
     run_dir = args.run_dir
     cfg = load_config(run_dir / "config.yaml")
+    if args.num_val_sequences is not None:
+        cfg.data.num_val_sequences = args.num_val_sequences
     device = torch.device(args.device or
                           (cfg.run.device if torch.cuda.is_available() else "cpu"))
 
@@ -138,26 +162,54 @@ def main() -> None:
     model.eval()
 
     # CSV is written incrementally (flushed after every checkpoint) so an
-    # interrupted sweep keeps all completed rows.
+    # interrupted sweep keeps all completed rows. The header is fixed up front
+    # to the 2dgs superset (base metrics + normal_err) so baseline rows for a
+    # representation with fewer keys (3dgs has no normal_err) fit the same
+    # columns — DictWriter leaves the missing cell blank.
+    fieldnames = ["epoch", "ckpt", "loss", "photo", "normal", "depth",
+                  "psnr", "ssim", "lpips", "normal_err",
+                  "depth_l1_abs", "depth_l2_abs", "depth_l1_rel", "depth_l2_rel"]
     out_csv = args.out or (run_dir / "val_metrics.csv")
-    writer = None
     with open(out_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        print("  " + "  ".join(f"{k:>12}" for k in fieldnames if k != "ckpt"))
+
+        def emit(label: str, ckpt_name: str, result: dict) -> None:
+            print("  " + f"{label:>12}  " + "  ".join(
+                f"{result[k]:>12.6f}" if k in result else f"{'':>12}"
+                for k in fieldnames if k not in ("epoch", "ckpt")))
+            writer.writerow({"epoch": label, "ckpt": ckpt_name,
+                             **{k: f"{v:.6f}" for k, v in result.items()}})
+            f.flush()
+
         for epoch, ckpt in selected:
             state = torch.load(ckpt, map_location=device, weights_only=True)
             model.load_state_dict(state)
             result = _validate(model, val_cache, val_loader, cfg.train.loss,
                                output_type, use_normals, use_depth, max_points,
                                device, seed=cfg.run.seed)
-            label = "final" if epoch is None else str(epoch)
-            if writer is None:
-                writer = csv.DictWriter(f, fieldnames=["epoch", "ckpt", *result])
-                writer.writeheader()
-                print("  " + "  ".join(f"{k:>12}" for k in ["epoch", *result]))
-            print("  " + f"{label:>12}  "
-                  + "  ".join(f"{v:>12.6f}" for v in result.values()), flush=True)
-            writer.writerow({"epoch": label, "ckpt": ckpt.name,
-                             **{k: f"{v:.6f}" for k, v in result.items()}})
-            f.flush()
+            emit("final" if epoch is None else str(epoch), ckpt.name, result)
+
+        if args.baseline:
+            passthrough = _Passthrough().to(device)
+            for bt in (t.strip() for t in args.baseline_types.split(",") if t.strip()):
+                # Reuse the already-built cache/loader when the baseline
+                # representation matches the run's; otherwise build that
+                # representation's val set in its own cache dir.
+                if bt == output_type:
+                    b_cache, b_loader = val_cache, val_loader
+                else:
+                    b_cache, b_loader, _, _ = build_val_set(
+                        cfg, dm, bt, run_dir / f"gaussian_cache_val_{bt}")
+                    if b_loader is None:
+                        print(f"[WARN] no usable 'val' sequences for {bt} "
+                              f"baseline — skipping")
+                        continue
+                result = _validate(passthrough, b_cache, b_loader, cfg.train.loss,
+                                   bt, bt == "2dgs", use_depth, max_points,
+                                   device, seed=cfg.run.seed)
+                emit(f"baseline_{bt}", "-", result)
     print(f"\nResults saved → {out_csv}")
 
 

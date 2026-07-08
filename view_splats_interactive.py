@@ -96,6 +96,8 @@ def parse_args():
                    help="Viser web server port (default: 8080)")
     p.add_argument("--gap",  type=float, default=1.3,
                    help="Initial gap multiplier: gap = scene_extent × this (default: 1.3)")
+    p.add_argument("--split", default="train", choices=["train", "val", "test"],
+                   help="Dataset split to pick the sequence from (default: train)")
     return p.parse_args()
 
 
@@ -135,7 +137,8 @@ def main():
         load_masks=False,
         load_depths=False,
     )
-    splat_loader = splat_dm.splat_only_loader(max_splats=max_splats)
+    splat_loader = splat_dm.splat_only_loader(max_splats=max_splats,
+                                              subsets=(args.split,))
     all_batches  = list(splat_loader.batch_sampler._batches)
 
     rng          = random.Random(args.seed)

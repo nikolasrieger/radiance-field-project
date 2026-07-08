@@ -100,7 +100,15 @@ def depth_errors(pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor) -> di
 
 
 def normal_angular_error(pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Mean angular error in degrees between unit normal maps, over ``mask``."""
+    """Mean angular error in degrees between normal maps, over ``mask``.
+
+    ``pred`` and ``gt`` are unit-normalized first so the dot product is a true
+    cosine: the 2dgs rasterizer emits alpha-composited normals whose magnitude
+    is generally < 1, which would otherwise inflate ``acos`` and overstate the
+    error.
+    """
+    pred     = F.normalize(pred, dim=1)
+    gt       = F.normalize(gt, dim=1)
     dot      = (pred * gt).sum(dim=1, keepdim=True).clamp(-1.0, 1.0)
     ang_deg  = torch.rad2deg(torch.acos(dot))
     n_valid  = mask.sum().clamp(min=1.0)

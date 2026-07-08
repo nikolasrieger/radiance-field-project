@@ -278,17 +278,25 @@ def _frame_losses(recon, fd, loss_cfg, output_type, use_normals, use_depth, devi
         )
         photo_loss  = _photometric_loss(rendered, v_gt, v_mask, loss_cfg)
         normals_cam = world_normals_to_camera(rendered_normals, v_mats)
+        # The 2dgs rasterizer emits alpha-composited normals whose magnitude is
+        # generally < 1; unit-normalize so the dot product is a true cosine and
+        # the loss measures pure angular error rather than being attenuated by
+        # low-opacity pixels.
+        normals_cam = F.normalize(normals_cam, dim=1)
         depth_valid = (v_gt_normals.norm(dim=1, keepdim=True) > 0.5).float()
         if loss_cfg.normal_region == NormalRegion.full:
             normal_mask = depth_valid
         else:
             normal_mask = (v_mask > 0.5).float() * depth_valid
+        # Average over the valid (masked) pixels only, so the loss magnitude is
+        # independent of how much of the frame the object occupies.
+        n_valid = normal_mask.sum().clamp(min=1.0)
         if loss_cfg.normal_loss_type == NormalLossType.cosine:
             dot = (normals_cam * v_gt_normals).sum(dim=1, keepdim=True).clamp(-1.0, 1.0)
-            normal_loss = ((1.0 - dot) * normal_mask).mean()
+            normal_loss = ((1.0 - dot) * normal_mask).sum() / n_valid
         else:
-            normal_loss = F.l1_loss(normals_cam * normal_mask,
-                                    v_gt_normals * normal_mask)
+            l1 = (normals_cam - v_gt_normals).abs() * normal_mask
+            normal_loss = l1.sum() / (n_valid * normals_cam.shape[1])
         if use_depth:
             _, rendered_depth = render_view(
                 recon, v_mats, v_K, v_w, v_h,
