@@ -8,7 +8,7 @@ data:
   num_supervision_views: 50
   num_workers: 4
   num_sequences: 0
-  num_val_sequences: 200
+  num_val_sequences: 50
   num_val_views: 10
   max_splats: 260000
   max_points: 260000
@@ -48,5 +48,5 @@ train:
     normal_region: foreground
     recon_region: foreground
     lambda_ssim: 0.0
-    lambda_normal: 0.05
+    lambda_normal: 0.2
     lambda_depth: 0.0
