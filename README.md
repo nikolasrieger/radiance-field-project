@@ -1,6 +1,26 @@
 # Radiance Field Project
 
-VERY IMPORTANT NOTE: ALWAYS USE FOREGROUND MASK!!!
+## Motivation
+
+Converting a reconstructed scene to a different rendering primitive often
+requires per-scene optimization. This project explores learning that
+conversion across scenes, predicting splat updates in a single forward
+pass. Our main focus is converting 3D Gaussians into surface-oriented
+2D Gaussian splats while preserving appearance and geometry.
+
+## Architecture
+
+The network takes Gaussian positions, colors, scales, orientations, and
+opacities as input and predicts residual updates to their parameters.
+
+We compare **MiniPointNet**, which combines per-splat features with a
+global scene descriptor, and **PointNet++**, which captures local geometry
+through hierarchical spatial grouping. Optional decoder branches separate
+geometry from appearance, with output heads for 3D Gaussians, 2D Gaussian
+splats, and experimental LinPrim primitives.
+
+Training uses multi-view uCO3D observations and differentiable rendering,
+combining image reconstruction with optional depth and normal supervision.
 
 ## Setup
 
